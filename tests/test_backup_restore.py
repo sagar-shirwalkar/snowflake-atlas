@@ -9,7 +9,6 @@ import pytest
 from atlas.backup import create_snapshot
 from atlas.restore import restore_snapshot
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -95,7 +94,7 @@ class TestRestoreSnapshot:
             restore_snapshot(tmp_path / "nonexistent.tar.gz", tmp_path / "out")
 
     def test_restore_verifies_manifest(self, bundle_dir: Path, tmp_path: Path):
-        snapshot_path = create_snapshot(bundle_dir, bundle_dir.parent / ".backups")
+        create_snapshot(bundle_dir, bundle_dir.parent / ".backups")  # noqa: F841
 
         # Create an invalid snapshot without manifest
         corrupt_path = tmp_path / "corrupt.tar.gz"

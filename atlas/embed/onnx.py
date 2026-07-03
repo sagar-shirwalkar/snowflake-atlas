@@ -14,16 +14,13 @@ At runtime, the embedder can load from a local directory (the bundle's
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import onnxruntime as ort
 from tokenizers import Tokenizer
 
 from .base import (
-    DEFAULT_MODEL_ID,
     EMBEDDING_DIM,
     MAX_SEQ_LENGTH,
     Embedder,

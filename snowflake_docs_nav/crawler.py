@@ -24,21 +24,17 @@ import argparse
 import asyncio
 import datetime
 import json
-import os
 import random
 import re
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urljoin, urlparse
 
 import aiofiles
 import aiohttp
-from bs4 import BeautifulSoup
-
 import yaml
-
+from bs4 import BeautifulSoup
 
 # =========================================================================
 # Browser profiles for stealth mode
@@ -320,7 +316,7 @@ class BaseEngine:
     async def stop(self):
         """Release resources."""
 
-    async def fetch(self, url: str) -> Optional[str]:
+    async def fetch(self, url: str) -> str | None:
         """Return response body text, or None on failure."""
         ...
 
@@ -345,7 +341,7 @@ class AiohttpEngine(BaseEngine):
         self.delay_min = delay_min
         self.delay_max = delay_max
         self.semaphore = asyncio.Semaphore(max_concurrent)
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.session: aiohttp.ClientSession | None = None
         self._last_request = 0.0
 
     async def start(self):
@@ -372,7 +368,7 @@ class AiohttpEngine(BaseEngine):
             await asyncio.sleep(delay - elapsed)
         self._last_request = time.monotonic()
 
-    async def fetch(self, url: str) -> Optional[str]:
+    async def fetch(self, url: str) -> str | None:
         await self._rate_limit()
         async with self.semaphore:
             try:
@@ -389,7 +385,7 @@ class AiohttpEngine(BaseEngine):
                         print(f"  404: {url}")
                     else:
                         print(f"  HTTP {resp.status}: {url}")
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            except (TimeoutError, aiohttp.ClientError, OSError) as exc:
                 print(f"  Error fetching {url}: {exc}")
         return None
 
@@ -430,7 +426,7 @@ class CamoufoxEngine(BaseEngine):
         if self._camoufox:
             await self._camoufox.__aexit__(None, None, None)
 
-    async def fetch(self, url: str) -> Optional[str]:
+    async def fetch(self, url: str) -> str | None:
         async with self.semaphore:
             try:
                 # Camoufox returns a stealth-patched Playwright page.
@@ -464,8 +460,8 @@ class SnowflakeCrawler:
     def __init__(
         self,
         output_dir: Path,
-        sections: Optional[list[str]] = None,
-        max_pages: Optional[int] = None,
+        sections: list[str] | None = None,
+        max_pages: int | None = None,
         engine: str = "aiohttp",
         stealth: bool = False,
         delay: float = DEFAULT_DELAY,
@@ -515,7 +511,7 @@ class SnowflakeCrawler:
 
     # ---- internal helpers ------------------------------------------------
 
-    async def _fetch(self, url: str) -> Optional[str]:
+    async def _fetch(self, url: str) -> str | None:
         return await self.engine_impl.fetch(url)
 
     @staticmethod

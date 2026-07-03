@@ -1,7 +1,5 @@
 """Tests for the filesystem MCP server (atlas/fs_server.py)."""
 
-import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -16,7 +14,6 @@ from atlas.fs_server import (
     read_publication_file,
 )
 from atlas.sources import LocalSource
-
 
 # ---------------------------------------------------------------------------
 # create_source factory

@@ -1,8 +1,6 @@
 """Tests for the embedding backends and selection logic."""
 
 import platform
-import subprocess
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +19,6 @@ from atlas.embed.base import (
     resolve_backend,
 )
 
-
 # ---------------------------------------------------------------------------
 # Platform detection
 # ---------------------------------------------------------------------------
@@ -36,7 +33,6 @@ def test_is_apple_silicon_true_on_mac_arm():
 
 def test_is_apple_silicon_mocked():
     """Check the logic independent of the actual host."""
-    import atlas.embed.base as embed_base
 
     orig_system = platform.system
     orig_machine = platform.machine
@@ -246,7 +242,6 @@ class TestEmbedderConcrete:
 
     def test_embed_with_progress_retry_then_give_up(self, stub_embedder):
         """A failing embed should retry and then fill with zeros."""
-        import atlas.embed.base as embed_base
 
         class FailingEmbedder(type(stub_embedder)):
             attempt = 0

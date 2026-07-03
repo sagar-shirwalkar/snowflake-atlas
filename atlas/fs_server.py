@@ -34,7 +34,6 @@ from mcp.types import TextContent, Tool
 from .log import configure_logging, get_logger
 from .sources import GitSource, LocalSource, MarkdownSource, WebCrawlSource
 
-
 app = Server("snowflake-fs")
 logger = get_logger()
 
@@ -96,10 +95,10 @@ def list_publication_files(source: MarkdownSource, publication: str) -> list[dic
         pub_dir = source.mirror_root / publication
     elif hasattr(source, 'repo_path'):
         pub_dir = source.repo_path / "markdown" / publication
-    
+
     if not pub_dir or not pub_dir.is_dir():
         raise FileNotFoundError(f"Publication not found: {publication}")
-    
+
     out: list[dict[str, Any]] = []
     for f in sorted(pub_dir.rglob("*.md")):
         parsed = _parse_md(f)
@@ -126,7 +125,7 @@ def read_publication_file(source: MarkdownSource, publication: str, file: str, m
         base = source.repo_path / "markdown"
     else:
         raise ValueError("Unknown source type")
-    
+
     target = (base / publication / file).resolve()
     pub_root = (base / publication).resolve()
     if not str(target).startswith(str(pub_root)):
@@ -172,29 +171,29 @@ def full_text_search(
 ) -> list[dict[str, Any]]:
     if not shutil.which("rg"):
         raise RuntimeError("ripgrep (rg) not installed. Install via `brew install ripgrep`.")
-    
+
     if hasattr(source, 'mirror_root'):
         search_root = source.mirror_root
     elif hasattr(source, 'repo_path'):
         search_root = source.repo_path / "markdown"
     else:
         raise ValueError("Unknown source type")
-    
+
     if scope:
         search_root = search_root / scope
     if not search_root.is_dir():
         raise FileNotFoundError(f"Scope not found: {scope}")
-    
+
     cmd = ["rg", "--no-heading", "--line-number", "--color", "never"]
     if not regex:
         cmd.append("--fixed-strings")
     cmd.extend(["--max-count", "1", query, str(search_root)])
-    
+
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     hits: list[dict[str, Any]] = []
-    
+
     base_path = source.mirror_root if hasattr(source, 'mirror_root') else source.repo_path / "markdown"
-    
+
     for line in proc.stdout.splitlines()[:max_results]:
         if ":" not in line:
             continue

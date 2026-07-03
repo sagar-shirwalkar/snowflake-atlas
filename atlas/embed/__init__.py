@@ -7,8 +7,8 @@ from .base import (
     Backend,
     Embedder,
     get_embedder,
-    load_embeddings,
     l2_normalize,
+    load_embeddings,
     mean_pool,
     resolve_backend,
 )

@@ -1,17 +1,16 @@
 """Tests for the chunker and frontmatter parser."""
 
-import tempfile
 from pathlib import Path
 
 import pytest
 
 from atlas.chunk import (
+    _hard_split,
+    _is_code_chunk,
+    _split_on_h2,
     chunk_file,
     chunk_markdown,
     parse_frontmatter,
-    _split_on_h2,
-    _is_code_chunk,
-    _hard_split,
 )
 
 

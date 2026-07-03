@@ -11,7 +11,6 @@ Hugging Face). 22.7 M params, ~74 NDCG@10 on MS MARCO.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 

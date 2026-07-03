@@ -184,7 +184,7 @@ def get_embedder(model_id: str | Path, prefer: str | None = None) -> Embedder:
             return MlxEmbedder(model_id)
         except (ImportError, FileNotFoundError) as e:
             print(f"  [embed] MLX backend unavailable: {e}")
-            print(f"  [embed] Falling back to ONNX+CPU")
+            print("  [embed] Falling back to ONNX+CPU")
             from .onnx import OnnxEmbedder
 
             return OnnxEmbedder(model_id, prefer_gpu=False)

@@ -61,7 +61,6 @@ from .embed import (
 from .log import configure_logging, get_logger
 from .sources import GitSource, LocalSource, MarkdownSource, WebCrawlSource
 
-
 logger = get_logger()
 
 DEFAULT_BRANCH = "main"
@@ -337,16 +336,16 @@ def write_manifest(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build the Atlas RAG bundle")
     p.add_argument("--source-type", choices=["git", "web-crawl", "local"], default="git", help="Source type")
-    
+
     # Git source args
     p.add_argument("--repo-path", default=DEFAULT_LOCAL_PATH, help="Local path to git repo (git source)")
     p.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="Git repo URL (git source)")
     p.add_argument("--branch", default=DEFAULT_BRANCH, help="Git branch (git source)")
-    
+
     # Web-crawl/local source args
     p.add_argument("--mirror-path", help="Path to local mirror (web-crawl/local source)")
     p.add_argument("--crawl-meta", help="Path to crawl_meta.json (web-crawl source)")
-    
+
     # Shared args
     p.add_argument("--output", required=True, type=Path, help="Output bundle directory")
     p.add_argument("--model", default=DEFAULT_MODEL_ID, help="HF model id or local path")
@@ -364,7 +363,7 @@ def parse_args() -> argparse.Namespace:
 def _run() -> int:
     args = parse_args()
     configure_logging()
-    
+
     source = create_source(args)
     files = walk_markdown(source)
     if args.limit:

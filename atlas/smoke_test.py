@@ -9,22 +9,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 from pathlib import Path
 
-from mcp.types import TextContent
-
-from .fs_server import app as fs_app, get_source, set_source
-from .rag_server import app as rag_app, _bundle_cache
-from .sources import GitSource, WebCrawlSource, LocalSource
+from .fs_server import set_source
+from .rag_server import _bundle_cache
+from .sources import GitSource, LocalSource, WebCrawlSource
 
 
 async def test_fs_server(source, verbose: bool = False) -> list[str]:
     """Test filesystem server tools."""
     errors = []
     set_source(source)
-    
+
     # Test list_publications
     try:
         from .fs_server import list_publications
@@ -83,7 +80,7 @@ async def test_fs_server(source, verbose: bool = False) -> list[str]:
 async def test_rag_server(bundle_path: Path, verbose: bool = False) -> list[str]:
     """Test RAG server tools."""
     errors = []
-    
+
     try:
         bundle = await _bundle_cache(str(bundle_path), "auto")
     except Exception as e:

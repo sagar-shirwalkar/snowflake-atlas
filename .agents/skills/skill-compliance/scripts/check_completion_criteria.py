@@ -12,7 +12,6 @@ import re
 import sys
 from pathlib import Path
 
-
 STEP_HEADING_PATTERN = re.compile(r"^#{1,3}\s+(PHASE\s+\d+|Step\s+\d+|Phase\s+\d+)", re.IGNORECASE)
 # Match **Completion criterion** or **Completion criterion:** (colon inside bold markers)
 CRITERION_PATTERN = re.compile(r"\*\*[Cc]ompletion criterion.*?\*\*", re.IGNORECASE)

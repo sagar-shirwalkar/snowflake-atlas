@@ -14,7 +14,6 @@ import re
 import sys
 from pathlib import Path
 
-
 LEADING_SECTION_PATTERN = re.compile(
     r"^#{1,3}\s+(?:Core concepts|Leading words?|Leading word|Key concepts)",
     re.IGNORECASE | re.MULTILINE,

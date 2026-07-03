@@ -32,7 +32,6 @@ from pathlib import Path
 
 import numpy as np
 
-
 # HF -> MLX key mapping for BGE-base-en-v1.5.
 # HF follows: encoder.layer.{i}.attention.{self.{query,key,value},output.dense}
 #            encoder.layer.{i}.attention.{self,output}.LayerNorm
@@ -98,19 +97,17 @@ def _hf_to_mlx(hf_key: str) -> str | None:
                 if parts[5] == "LayerNorm":
                     suffix = "." + parts[6]  # weight / bias
                     return f"encoder.layer.{i}.attention.LayerNorm{suffix}"
-        if block == "intermediate":
-            if parts[4] == "dense":
-                bias = len(parts) == 6 and parts[5] == "bias"
-                suffix = ".bias" if bias else ".weight"
-                return f"encoder.layer.{i}.ffn.lin1{suffix}"
-        if block == "output":
-            if parts[4] == "dense":
-                bias = len(parts) == 6 and parts[5] == "bias"
-                suffix = ".bias" if bias else ".weight"
-                return f"encoder.layer.{i}.ffn.lin2{suffix}"
-            if parts[4] == "LayerNorm":
-                suffix = "." + parts[5]
-                return f"encoder.layer.{i}.ffn.LayerNorm{suffix}"
+        if block == "intermediate" and parts[4] == "dense":
+            bias = len(parts) == 6 and parts[5] == "bias"
+            suffix = ".bias" if bias else ".weight"
+            return f"encoder.layer.{i}.ffn.lin1{suffix}"
+        if block == "output" and parts[4] == "dense":
+            bias = len(parts) == 6 and parts[5] == "bias"
+            suffix = ".bias" if bias else ".weight"
+            return f"encoder.layer.{i}.ffn.lin2{suffix}"
+        if block == "output" and parts[4] == "LayerNorm":
+            suffix = "." + parts[5]
+            return f"encoder.layer.{i}.ffn.LayerNorm{suffix}"
 
     return None
 

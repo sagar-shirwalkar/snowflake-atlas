@@ -7,7 +7,6 @@ import pytest
 
 from atlas.sources import GitSource, LocalSource, MarkdownSource, WebCrawlSource
 
-
 # ---------------------------------------------------------------------------
 # MarkdownSource ABC
 # ---------------------------------------------------------------------------

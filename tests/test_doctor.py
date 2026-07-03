@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from atlas.doctor import (
     _probe_bundle,
     _probe_disk_free,
@@ -16,7 +14,6 @@ from atlas.doctor import (
     _probe_ripgrep,
     run_diagnosis,
 )
-
 
 # ---------------------------------------------------------------------------
 # _probe_platform

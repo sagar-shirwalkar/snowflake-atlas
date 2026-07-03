@@ -11,7 +11,6 @@ import pytest
 
 from atlas.rag_server import Bundle, _bundle_cache
 
-
 # ---------------------------------------------------------------------------
 # Stub embedder that doesn't need a real ONNX model
 # ---------------------------------------------------------------------------

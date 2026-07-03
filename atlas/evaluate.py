@@ -13,36 +13,33 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-
-from .embed import get_embedder, load_embeddings, resolve_backend
-from .rerank import CrossEncoderReranker
 import pyarrow.parquet as pq
+
+from .embed import get_embedder, load_embeddings
+from .rerank import CrossEncoderReranker
 
 
 def load_bundle(bundle_dir: Path, prefer: str = "auto"):
     """Load bundle components for evaluation."""
     manifest_path = bundle_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    
+
     table = pq.read_table(bundle_dir / "chunks.parquet")
     embeddings = load_embeddings(bundle_dir)
     norms_path = bundle_dir / "norms.f32.npy"
-    if norms_path.is_file():
-        norms = np.load(norms_path)
-    else:
-        norms = np.linalg.norm(embeddings, axis=1).astype(np.float32)
-    
+    norms = np.load(norms_path) if norms_path.is_file() else np.linalg.norm(embeddings, axis=1).astype(np.float32)
+
     bundled_model = bundle_dir / "model" / "onnx" / "model.onnx"
     model_id = bundle_dir / "model" if bundled_model.is_file() else manifest["embedding_model"]
     embedder = get_embedder(model_id, prefer=prefer)
-    
+
     # Extract columns
     pub_col = table.column("publication").to_numpy(zero_copy_only=False)
     file_col = table.column("file").to_pylist()
     id_col = table.column("id").to_pylist()
     text_col = table.column("text").to_pylist()
     title_col = table.column("title").to_pylist()
-    
+
     return {
         "manifest": manifest,
         "embeddings": embeddings,
@@ -61,7 +58,7 @@ def search_bundle(bundle: dict, query: str, top_k: int = 10) -> list[dict[str, A
     """Run vector search on the bundle."""
     q = bundle["embedder"].embed([query])[0]
     scores = (bundle["embeddings"] @ q).flatten() / bundle["norms"].clip(min=1e-9)
-    
+
     # Title boost
     query_tokens = set(query.lower().split())
     if query_tokens:
@@ -71,7 +68,7 @@ def search_bundle(bundle: dict, query: str, top_k: int = 10) -> list[dict[str, A
             matches = pc.match_substring(bundle["title"], t)
             tb += matches.cast("float32").to_numpy()
         scores += tb * 0.05
-    
+
     order = np.argsort(-scores)
     results = []
     for i in order[:top_k]:
@@ -102,40 +99,35 @@ def evaluate(bundle_dir: Path, golden_path: Path, top_k: int = 10, prefer: str =
     """Run evaluation and return metrics."""
     print(f"Loading bundle from {bundle_dir}...")
     bundle = load_bundle(bundle_dir, prefer)
-    
+
     reranker = None
     if rerank:
         print("Loading cross-encoder re-ranker...")
         reranker = CrossEncoderReranker()
-    
+
     print(f"Loading golden set from {golden_path}...")
     golden = load_golden(golden_path)
     print(f"Evaluating {len(golden)} queries...")
-    
+
     precisions = []
     mrrs = []
-    
+
     for i, item in enumerate(golden):
         query = item["query"]
         expected_files = set(item.get("expected_files", []))
         expected_publications = set(item.get("expected_publications", []))
-        
+
         results = search_bundle(bundle, query, top_k=100 if reranker else top_k)
-        
-        if reranker and results:
-            results = reranker.rerank(query, results, top_k=top_k)
-        else:
-            results = results[:top_k]
-        
+
+        results = reranker.rerank(query, results, top_k=top_k) if reranker and results else results[:top_k]
+
         # Precision@k
         retrieved_files = {f"{r['publication']}/{r['file']}" for r in results}
-        retrieved_pubs = {r['publication'] for r in results}
-        
         # Check file-level matches
         hits = retrieved_files & expected_files
         precision = len(hits) / top_k if top_k > 0 else 0
         precisions.append(precision)
-        
+
         # MRR - first relevant result
         mrr = 0.0
         for rank, r in enumerate(results, 1):
@@ -148,15 +140,15 @@ def evaluate(bundle_dir: Path, golden_path: Path, top_k: int = 10, prefer: str =
                 mrr = 1.0 / rank
                 break
         mrrs.append(mrr)
-        
+
         if (i + 1) % 50 == 0:
             print(f"  Processed {i + 1}/{len(golden)} queries")
-    
+
     mean_precision = np.mean(precisions) if precisions else 0
     std_precision = np.std(precisions) if precisions else 0
     mean_mrr = np.mean(mrrs) if mrrs else 0
     std_mrr = np.std(mrrs) if mrrs else 0
-    
+
     return {
         "num_queries": len(golden),
         "top_k": top_k,
@@ -188,7 +180,7 @@ def _run() -> int:
         prefer=args.prefer,
         rerank=args.rerank,
     )
-    
+
     print("\n" + "=" * 50)
     print("  EVALUATION RESULTS")
     print("=" * 50)
@@ -199,11 +191,11 @@ def _run() -> int:
     print(f"  Precision@{results['top_k']}: {results['mean_precision']:.4f} ± {results['std_precision']:.4f}")
     print(f"  MRR:                {results['mean_mrr']:.4f} ± {results['std_mrr']:.4f}")
     print("=" * 50)
-    
+
     if args.output:
         args.output.write_text(json.dumps(results, indent=2))
         print(f"\nResults written to {args.output}")
-    
+
     return 0
 
 

@@ -47,7 +47,6 @@ from .embed import (
 from .log import configure_logging, get_logger
 from .rerank import CrossEncoderReranker
 
-
 app = Server("snowflake-rag")
 logger = get_logger()
 

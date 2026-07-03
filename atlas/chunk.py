@@ -34,6 +34,7 @@ _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z", re.DOTALL)
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _FENCE_RE = re.compile(r"^```", re.MULTILINE)
 _MAX_CHUNK_CHARS = 8000
+_OVERLAP_CHARS = 150  # tail chars carried from previous H2 section to next
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -121,12 +122,34 @@ def _hard_split(text: str, max_chars: int) -> list[str]:
     return [p for p in parts if p]
 
 
+def _section_tail(text: str, n_chars: int = _OVERLAP_CHARS) -> str:
+    """Return the last ~``n_chars`` of ``text``, cleanly word-broken."""
+    if len(text) <= n_chars:
+        return text
+    tail = text[-n_chars:].lstrip()
+    # Try to break at a paragraph boundary for cleanness
+    para = tail.find("\n\n")
+    if 0 < para < len(tail) // 2:
+        return tail[para + 2 :]
+    # Otherwise break at the first space so we don't split a word
+    sp = tail.find(" ")
+    if 0 < sp < len(tail) // 2:
+        return tail[sp + 1 :]
+    return tail
+
+
 def chunk_markdown(
     text: str,
     publication: str,
     file: str,
+    overlap_chars: int = _OVERLAP_CHARS,
 ) -> list[dict]:
     """Chunk a single markdown file into H2-boundary records.
+
+    Adjacent sections carry a small text overlap (the tail of the
+    previous section) so that queries straddling a section boundary
+    still match. The overlap text is prepended without a special
+    marker — the embedding model treats it as natural context.
 
     ``publication`` and ``file`` are stamped into every chunk as
     metadata. The ``file`` argument should be the path relative to
@@ -135,13 +158,32 @@ def chunk_markdown(
     frontmatter, body = parse_frontmatter(text)
     sections = _split_on_h2(body)
 
+    # Pre-compute tails for overlap before the chunking loop so that
+    # the overlap text is drawn from the raw section (before any
+    # heading prepend or hard-split augmentation).
+    tails = [""] * len(sections)
+    if overlap_chars > 0:
+        for i in range(len(sections) - 1):
+            tails[i + 1] = _section_tail(sections[i][1], overlap_chars)
+
     chunks: list[dict] = []
-    for heading, section_text in sections:
+    for i, (heading, section_text) in enumerate(sections):
+        # Prepend overlap from the previous section's tail
+        if tails[i]:
+            section_text = tails[i] + "\n\n" + section_text
+
         for piece in _hard_split(section_text, _MAX_CHUNK_CHARS):
+            # Augment the text with the heading hierarchy before embedding.
+            # Prepending the document title and section heading gives the
+            # embedding model strong semantic signal about the chunk's topic.
+            title = frontmatter.get("title", "")
+            augmented_text = (
+                f"{title}: {heading}\n{piece}" if title else f"{heading}\n{piece}"
+            )
             chunks.append(
                 {
                     "heading": heading,
-                    "text": piece,
+                    "text": augmented_text,
                     "frontmatter": frontmatter,
                     "publication": publication,
                     "file": file,

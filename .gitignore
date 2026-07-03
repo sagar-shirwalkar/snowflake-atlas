@@ -50,3 +50,6 @@ Thumbs.db
 
 # --- Harness artifacts ---
 .handoffs/
+
+# --- Eval-driven development (pixie-qa working dir) ---
+pixie_qa/

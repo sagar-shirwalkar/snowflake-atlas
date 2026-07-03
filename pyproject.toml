@@ -14,9 +14,11 @@ dependencies = [
     "sentencepiece>=0.2",
     "onnxruntime>=1.18",
     "structlog>=24.1",
-    "aiohttp>=3.9",
+    "aiohttp>=3.9.5",
     "aiofiles>=23.0",
     "beautifulsoup4>=4.12",
+    "pixie-qa[all]>=0.8.4,<0.9.0",
+    "rank-bm25>=0.2",
 ]
 
 [project.optional-dependencies]
@@ -74,9 +76,13 @@ select = [
     "C4",   # flake8-comprehensions
     "UP",   # pyupgrade
     "SIM",  # flake8-simplify
+    "D",    # pydocstyle
 ]
-ignore = ["E501"]
-
+ignore = [
+    "E501",
+    "D203",  # conflicts with D211 (blank line before class)
+    "D213",  # conflicts with D212 (multi-line summary)
+]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

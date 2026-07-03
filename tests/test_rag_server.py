@@ -17,6 +17,7 @@ from atlas.rag_server import Bundle, _bundle_cache
 
 class StubEmbedder:
     """Duck-typed embedder that returns random unit vectors."""
+
     backend = "test"
     active_provider = "stub"
     model_id = "test-model"
@@ -242,6 +243,67 @@ class TestTitleBoost:
     def test_boost_empty_titles(self, bundle):
         boost = Bundle._title_boost(pa.array([], type=pa.string()), {"test"})
         assert boost.shape == (0,)
+
+
+# ---------------------------------------------------------------------------
+# Hierarchical FS Chunking / cluster_tags
+# ---------------------------------------------------------------------------
+
+class TestClusterTags:
+    def test_cluster_tags_column_loaded(self, bundle):
+        """Bundle should load cluster_tags column if present."""
+        # The fixture doesn't include cluster_tags, so _cluster_tags_pa is None
+        assert bundle._cluster_tags_pa is None
+
+    def test_cluster_tags_boost_skipped_when_missing(self, bundle):
+        """Bundle without cluster_tags should still search correctly."""
+        # This should not raise — graceful fallback
+        results = bundle.search("table", top_k=3)
+        assert len(results) >= 1
+
+    def test_cluster_tags_with_column(self, tmp_path):
+        """Bundle with cluster_tags column should load and use it."""
+        from unittest.mock import patch
+
+        bdir = tmp_path / "bundle-cluster"
+        bdir.mkdir()
+
+        manifest = {
+            "schema_version": 1, "source_repo": "test", "source_branch": "main",
+            "source_sha": "abc", "built_at": "2025-01-01T00:00:00Z",
+            "chunk_count": 3, "embedding_model": "test", "embedding_dim": 768,
+        }
+        (bdir / "manifest.json").write_text(json.dumps(manifest))
+
+        rng = np.random.RandomState(42)
+        embeddings = rng.randn(3, 768).astype(np.float32)
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings = (embeddings / norms).astype(np.float32)
+        np.save(bdir / "embeddings.f16.npy", embeddings.astype(np.float16))
+        np.save(bdir / "norms.f32.npy", norms.flatten().astype(np.float32))
+
+        table = pa.table({
+            "id": ["c0", "c1", "c2"],
+            "text": ["Snowflake intro.", "CREATE TABLE syntax.", "SELECT query."],
+            "publication": ["ug", "sql", "sql"],
+            "file": ["intro.md", "create-table.md", "select.md"],
+            "heading": ["Overview", "Syntax", "Examples"],
+            "is_code": [False, True, False],
+            "title": ["Introduction", "CREATE TABLE", "SELECT"],
+            "product_area": ["Core", "SQL", "SQL"],
+            "last_updated": ["", "", ""],
+            "canonical_url": ["", "", ""],
+            "cluster_tags": ["create-table select", "intro select", "intro create-table"],
+        })
+        pq.write_table(table, bdir / "chunks.parquet")
+
+        with patch("atlas.rag_server.get_embedder", return_value=StubEmbedder()):
+            b = Bundle(bdir, prefer="cpu")
+
+        assert b._cluster_tags_pa is not None
+        # Search for a term that matches a cluster tag should work
+        results = b.search("intro", top_k=3)
+        assert len(results) >= 1
 
 
 # ---------------------------------------------------------------------------

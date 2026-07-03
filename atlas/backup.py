@@ -33,6 +33,7 @@ def create_snapshot(bundle_dir: Path, backup_root: Path) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse and return CLI arguments for the backup command."""
     p = argparse.ArgumentParser(description="Snapshot the current RAG bundle")
     p.add_argument("--bundle", type=Path, required=True, help="Path to the bundle directory")
     p.add_argument(
@@ -52,6 +53,7 @@ def _run() -> int:
 
 
 def main() -> None:
+    """Entry point: create a bundle snapshot and exit."""
     sys.exit(_run())
 
 

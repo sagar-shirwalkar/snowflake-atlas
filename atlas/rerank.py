@@ -23,6 +23,13 @@ class CrossEncoderReranker:
     """ONNX cross-encoder re-ranker for query-passage pairs."""
 
     def __init__(self, model_dir: Path | None = None) -> None:
+        """Initialize the ONNX cross-encoder reranker.
+
+        Args:
+            model_dir: Local directory with ONNX model files. If None,
+                       downloads from Hugging Face cache.
+
+        """
         if model_dir is None:
             # Default to HF cache
             from huggingface_hub import snapshot_download
@@ -76,6 +83,7 @@ class CrossEncoderReranker:
 
         Returns:
             Re-ranked list of results with updated 'score' field (cross-encoder logits)
+
         """
         if not results:
             return results

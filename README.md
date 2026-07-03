@@ -10,10 +10,11 @@ the entire [Snowflake documentation](https://docs.snowflake.com/) to any AI agen
   list publications, list files, read file, full-text search, get release info.
   No model, no embeddings, no state. ~zero startup.
 
-- **snowflake-rag** — semantic search over precomputed embeddings. Tools:
-  search_docs, search_code, get_chunk, get_bundle_info. Loads a portable
-  bundle once at startup (~1 GB); answers queries in ~1-2 ms (MLX on Apple
-  Silicon) or ~50-200 ms (ONNX+CPU).
+- **snowflake-rag** — semantic search over precomputed embeddings plus
+  optional BM25 keyword search. Tools: search_docs, search_code, get_chunk,
+  get_bundle_info. Three modes: `vector` (dense), `keyword` (BM25), `hybrid`
+  (RRF-fused). Loads a portable bundle once at startup (~1 GB); answers
+  queries in ~1-2 ms (MLX on Apple Silicon) or ~50-200 ms (ONNX+CPU).
 
 The RAG bundle is **built once** by the maintainer locally, then distributed
 as a single download via `atlas-download`. End users never embed, never chunk,
@@ -34,7 +35,8 @@ never run a vector database, never pull a model.
 9. [Troubleshooting](#9-troubleshooting)
 10. [Development](#10-development)
 11. [Validate RAG quality](#11-validate-rag-quality)
-12. [License](#12-license)
+12. [Contributing](#contributing)
+13. [License](#license)
 
 ---
 
@@ -74,10 +76,12 @@ server and a RAG server buys:
 | **Embedding dtype** | `float16` vectors, `float32` norms | Cosine similarity is rank-preserving under half precision. Halves bundle size. |
 | **Tokenizer** | `transformers` `AutoTokenizer` | First-class support for BGE fast tokenizer. |
 | **Docs source** | `https://docs.snowflake.com/llms.txt` | Official LLM-friendly markdown publication. Web-crawl mirrored. |
-| **Chunking** | H2-boundary sections per markdown file | Respects the docs' deliberate structure. One H2 = one chunk. |
+| **Chunking** | H2-boundary sections per markdown file + 150-char overlap between adjacent sections | Respects the docs' deliberate structure. Overlap catches boundary-spanning queries. |
+| **Chunk metadata** | Includes `cluster_tags` — space-joined sibling stems in the same directory | Enables path-aware relevance boost at query time without re-embedding. |
 | **Distribution** | GitHub Releases (per-tag) | Simple, free, CLI-friendly API. End users download with one command. |
 | **Doc crawler** | aiohttp + optional Camoufox stealth | Async, rate-limited, with jitter and rotating User-Agent pool. See [crawler docs](#9-troubleshooting). |
-| **Re-ranking** (opt-in) | `cross-encoder/ms-marco-MiniLM-L6-v2` (ONNX) | 22.7M params, 74.3 NDCG@10. Adds ~5 ms per query on MLX. |
+| **Keyword search** (build-time) | `rank-bm25` BM25Okapi | Indexed at bundle-build time from chunk texts. Pickled state (~a few MB for 250k docs). Enables `keyword` and `hybrid` search modes. |
+| **Re-ranking** (opt-in) | `BAAI/bge-reranker-v2-base` (MLX) or `cross-encoder/ms-marco-MiniLM-L6-v2` (ONNX) | 110M params (MLX), 22.7M params (ONNX). Auto-selects MLX on Apple Silicon, falls back to ONNX. Enabled with `--rerank`. |
 | **Package management** | `uv` | Fast resolver, lockfile, virtualenv, build system. |
 
 ---
@@ -101,9 +105,11 @@ snowflake-atlas/
 │   ├── backup.py                             Snapshot current bundle
 │   ├── restore.py                            Roll back to a previous snapshot
 │   ├── doctor.py                             Installation diagnosis + backend probe
+│   ├── bm25_search.py                        BM25 keyword index (build-time, optional)
 │   ├── smoke_test.py                         E2E validation (build + search)
 │   ├── evaluate.py                           RAG quality (Precision@10, MRR)
-│   ├── rerank.py                             Cross-encoder re-ranker (MiniLM-L6-v2 ONNX)
+│   ├── rerank.py                             Cross-encoder re-ranker (MiniLM-L6-v2 ONNX, portable)
+│   ├── rerank_mlx.py                         Cross-encoder re-ranker (bge-reranker-v2-base MLX, Apple Silicon)
 │   ├── embed/                                Embedding backends (factory pattern)
 │   │   ├── __init__.py
 │   │   ├── base.py                           ABC + factory + resolve_backend
@@ -123,10 +129,15 @@ snowflake-atlas/
 ├── scripts/
 │   └── publish-bundle.sh                     Local build + gh release create
 │
+├── tools/
+│   ├── convert_bge_to_mlx.py                 Convert BGE embedder weights to MLX .npy
+│   └── convert_reranker_to_mlx.py            Convert BGE reranker weights to MLX .npy
+│
 ├── tests/
 │   ├── __init__.py
 │   ├── test_chunk.py                         Chunker tests
 │   ├── test_embed.py                         Embedding backend tests
+│   ├── test_bm25_search.py                   BM25 keyword index tests
 │   ├── test_fs_server.py                     FS MCP server tests
 │   ├── test_rag_server.py                    RAG MCP server tests
 │   ├── test_sources.py                       Source adapter tests
@@ -247,6 +258,10 @@ Claude Desktop, Continue, and others.
   }
 }
 ```
+
+> **Search mode** is configured per-query via the `mode` parameter
+> (`vector`, `keyword`, or `hybrid`) on each `search_docs`/`search_code`
+> call. See [Search Modes](#search-modes).
 
 #### opencode (`~/.config/opencode/profiles/default.json`)
 
@@ -459,6 +474,9 @@ and ``atlas-build --prefer apple`` will use the ANE/GPU accelerator.
 
 ### 5.2 Build RAG bundle
 
+The build pipeline runs: crawl → chunk (with overlap + cluster_tags) →
+embed → BM25 index → write artifacts → stage model → manifest.
+
 ```bash
 # Full build
 uv run atlas-build \
@@ -477,7 +495,9 @@ uv run atlas-build \
 ```
 
 The build writes a `manifest.json` with the source SHA, chunk count,
-model ID, and SHA256 of each artifact.
+BM25 index size, model ID, and SHA256 of each artifact. The BM25 index
+is built automatically from chunk texts using `rank-bm25::BM25Okapi`
+and saved as `bm25.pkl` in the bundle directory.
 
 ### 5.3 Validate
 
@@ -516,6 +536,31 @@ uploads it. Users can then install it with `atlas-download`.
 The script lives at `scripts/publish-bundle.sh` — read it to see exactly
 what it does before running.
 
+### 5.4.5 MLX reranker weight conversion (Apple Silicon)
+
+The MLX cross-encoder reranker (`atlas/rerank_mlx.py`) requires
+pre-converted weights from the Hugging Face checkpoint. This is a
+**one-time step per machine**, like the embedder MLX conversion.
+
+```bash
+# Install torch temporarily for the conversion
+uv pip install torch
+
+# Run the conversion (writes to ~/.cache/atlas/models/bge-reranker-v2-base-mlx/)
+uv run python tools/convert_reranker_to_mlx.py
+
+# Uninstall torch — not needed at runtime
+uv pip uninstall torch --yes
+```
+
+The conversion reads `BAAI/bge-reranker-v2-base` (a BERT-base cross-encoder)
+and writes 199 ``.npy`` weight files (197 encoder weights + classifier
+head weight/bias). The MLX reranker loads them at
+``~/.cache/atlas/models/bge-reranker-v2-base-mlx/``.
+
+After conversion, the RAG server auto-selects MLX for reranking when
+`--rerank` is passed, falling back to ONNX if MLX weights aren't found.
+
 ### 5.5 Smoke-test the bundle
 
 After building or downloading a bundle, validate it end-to-end:
@@ -551,14 +596,16 @@ flowchart LR
     end
 
     subgraph Build["🔨 Bundle Builder"]
-        CHUNK["atlas-build<br/>chunk → embed → write"]
+        CHUNK["atlas-build<br/>chunk → embed → write → bm25"]
         MODEL[("bge-base-en-v1.5<br/>embedding model")]
+        BM25_BUILD[("rank-bm25<br/>BM25Okapi indexing")]
     end
 
     subgraph Bundle["📦 RAG Bundle"]
         CHUNKS["chunks.parquet"]
         VECTORS["embeddings.f16.npy"]
         NORMS["norms.f32.npy"]
+        BM25_PKL["bm25.pkl"]
         MANIFEST["manifest.json"]
     end
 
@@ -569,7 +616,7 @@ flowchart LR
 
     subgraph MCP["🧠 MCP Servers"]
         FS["snowflake-fs<br/>ripgrep-backed"]
-        RAG["snowflake-rag<br/>vector search"]
+        RAG["snowflake-rag<br/>vector / keyword / hybrid"]
     end
 
     subgraph Clients["💻 MCP Clients"]
@@ -587,9 +634,11 @@ flowchart LR
 
     MD -->|"read"| CHUNK
     MODEL -->|"embed"| CHUNK
+    BM25_BUILD -->|"index"| CHUNK
     CHUNK -->|"write"| CHUNKS
     CHUNK --> VECTORS
     CHUNK --> NORMS
+    CHUNK --> BM25_PKL
     CHUNK --> MANIFEST
 
     Bundle -->|"tar + gh release"| RELEASE
@@ -635,7 +684,7 @@ swapping, so you can always go back one more step.
 uv run atlas-backup --bundle ./data/snowflake-rag-bundle --keep 5
 ```
 
-### 6.6 Diagnose with `atlas-doctor`
+### 6.4 Diagnose with `atlas-doctor`
 
 ```bash
 uv run atlas-doctor
@@ -674,7 +723,7 @@ when something is wrong.
 | Command | Description |
 |---------|-------------|
 | `snowflake-fs` | Filesystem MCP server (ripgrep-based) |
-| `snowflake-rag` | RAG MCP server (vector search) |
+| `snowflake-rag` | RAG MCP server (vector, keyword, hybrid search) |
 | `atlas-build` | Build RAG bundle from source |
 | `atlas-download` | Download bundle from GitHub Releases |
 | `atlas-backup` | Snapshot current bundle |
@@ -709,6 +758,71 @@ ATLAS_EMBED_BACKEND=cpu uv run snowflake-rag
 
 ---
 
+## Search Modes
+
+The `snowflake-rag` server supports three search modes, selected via the
+`mode` parameter on each `search_docs`/`search_code` call:
+
+| Mode | How it works | Best for |
+|------|-------------|----------|
+| `hybrid` (default) | Reciprocal Rank Fusion of vector + BM25 results | Maximum recall — catches what either method misses |
+| `vector` | Cosine similarity on dense embeddings only | General-purpose semantic search |
+| `keyword` | BM25Okapi term-frequency scoring (requires `bm25.pkl` in bundle) | Exact identifier lookups (SQL functions, error codes, config options) |
+
+**The mode is per-query**, so a client can use `keyword` for a SQL
+function lookup (`TO_DATE`), `vector` for fuzzy concept search (`"how
+do I set up RBAC"`), and `hybrid` (the default) when coverage matters most.
+
+The BM25 index is built at bundle-build time. If a bundle lacks
+`bm25.pkl` (older bundles), `keyword` and `hybrid` fall back to
+a simple title-boost heuristic automatically — no crash, no error.
+
+---
+
+## Retrieval Enhancements
+
+### Chunk Overlap
+
+Adjacent H2 sections share a small text overlap (150 characters from the
+tail of the previous section) so that queries straddling a section boundary
+still match. The overlap is prepended without a special marker — the
+embedding model treats it as natural context.
+
+- Controlled via `_OVERLAP_CHARS` in `atlas/chunk.py` (default 150).
+- Zero runtime cost — embedded at build time.
+- Can cause adjacent sections to inherit code-fence flags (`is_code`), which
+  is correct: a section that begins with a code snippet from overlap _is_
+  relevant for `search_code`.
+
+### Hierarchical File-System Chunking (Path-Aware Boost)
+
+At build time, each chunk is tagged with `cluster_tags` — the space-joined
+stems of sibling `.md` files in the same directory. At query time, the RAG
+server applies a small relevance boost (`0.03` weight) to chunks whose
+`cluster_tags` match query tokens.
+
+This is a lightweight form of path-aware retrieval that surfaces related
+docs from the same file-system "neighbourhood" without re-embedding.
+
+- **Build-time:** sibling map computed in `make_bundle.py::build_chunk_table()`.
+- **Query-time:** `pc.match_substring` on `cluster_tags` in `Bundle.search()`.
+- **Graceful fallback:** old bundles without the column skip the boost.
+
+### Cross-Encoder Reranker (opt-in)
+
+The `--rerank` flag enables a cross-encoder re-ranker that re-scores the
+top-100 candidates from hybrid search using a joint query-passage model.
+
+- **MLX backend** (Apple Silicon): `BAAI/bge-reranker-v2-base` — 110M params,
+  BERT-base encoder + classification head. Weights converted via
+  `tools/convert_reranker_to_mlx.py`.
+- **ONNX backend** (portable): `cross-encoder/ms-marco-MiniLM-L6-v2` —
+  22.7M params, auto-downloaded from Hugging Face.
+- Auto-selects MLX if available, falls back to ONNX.
+- Adds ~5 ms/query (MLX) or ~50-200 ms (ONNX+CPU).
+
+---
+
 ## Configuration
 
 Create `~/.config/atlas.toml` to set default backend:
@@ -727,13 +841,6 @@ export ATLAS_EMBED_BACKEND=apple
 ---
 
 ## 7. Roadmap
-
-### Cross-encoder re-ranker (`atlas/rerank.py`)
-
-A cross-encoder re-ranker that re-scores the top-100 candidates from
-semantic search using a joint query-passage model. Enabled with
-`--rerank` on the RAG server. Uses the MiniLM-L6-v2 cross-encoder
-model exported to ONNX (~45 MB, ~5 ms per query on MLX).
 
 ### Reasoning agent (`atlas/agent.py`, planned)
 
@@ -775,6 +882,10 @@ What it should eventually be:
 - The embedder's `max_seq_length` is 512 tokens. Chunks larger than
   that are silently truncated. The H2 chunker rarely produces such
   chunks, but the `chunk._hard_split` fallback handles them.
+- Chunk overlap can cause adjacent sections to inherit code-fence flags
+  (`is_code = True`) when the overlap text carries a code fence from the
+  previous section. This is correct behaviour: sections near code are
+  relevant for `search_code`.
 - Cosine scores are not calibrated. A score of 0.7 is only meaningful
   relative to other scores from the same query. Use `min_score` loosely.
 - The bundle targets a single snapshot of Snowflake docs. Re-build
@@ -871,12 +982,28 @@ jq . data/snowflake-rag-bundle/manifest.json
 from atlas.rag_server import Bundle
 b = Bundle('data/snowflake-rag-bundle', prefer='apple')
 for h in b.search('Snowflake tasks', top_k=3):
-    print(f'{h[\"score\"]:.3f}  {h[\"file\"]}')
+    print(f'{h["score"]:.3f}  {h["file"]}')
 "
 ```
 
 Install `jq` once (`brew install jq` on macOS, `apt install jq` on
 Linux) and the first command is the one you'll reach for every time.
+
+### Lint
+
+ruff enforces style *and* docstring conventions (pydocstyle rules are
+enabled via `"D"` in `pyproject.toml`):
+
+```bash
+uv run ruff check .
+# Auto-fix trivial issues (blank lines, punctuation):
+uv run ruff check --fix .
+```
+
+The ``atlas/`` package is fully clean (zero violations). 216 remaining
+D violations are in ``tests/`` and ``tools/`` only. Codacy's Pylint
+runner flags the same gaps; fixing them locally cuts dashboard noise.
+See ``pyproject.toml`` for the full rule set.
 
 ### Run unit tests
 
@@ -884,7 +1011,8 @@ Linux) and the first command is the one you'll reach for every time.
 uv run pytest tests/ -v
 ```
 
-Runs the full test suite (chunker, embedder, MCP servers, bundle build).
+Runs the full test suite (chunker, embedder, MCP servers, bundle build,
+BM25 keyword index).
 
 ### Run the smoke test
 
@@ -911,27 +1039,92 @@ all existing bundles.
 ### Change the chunker
 
 Edit `atlas/chunk.py`. The schema is documented in the module docstring.
-Run `atlas-smoke` after changes.
+Run `atlas-smoke` after changes. Key parameters:
+- `_OVERLAP_CHARS` (150) — tail chars carried between adjacent H2 sections
+- `_MAX_CHUNK_CHARS` (8000) — hard-split threshold for oversized sections
+
+### Add a reranker
+
+Two paths exist:
+- **MLX (Apple Silicon):** Add a model class in `atlas/rerank_mlx.py` and a
+  converter in `tools/convert_reranker_to_mlx.py`. The BERT-base architecture
+  is already supported via `atlas/embed/mlx.BgeModel`.
+- **ONNX (portable):** Export a Hugging Face cross-encoder to ONNX and add a
+  `CrossEncoderReranker` subclass in `atlas/rerank.py`. Registration is
+  automatic via the try/except in `rag_server.py`.
 
 ---
 
 ## 11. Validate RAG quality
 
-To evaluate the quality of the RAG system beyond the basic smoke test,
-run the dedicated evaluation tool:
+The project ships a golden set of queries covering the major Snowflake
+documentation areas (warehouses, Cortex AI, Snowpipe, dynamic tables,
+security, Iceberg, search optimization, etc.). To evaluate retrieval quality:
 
 ```bash
-uv run atlas-evaluate --prefer apple --top-k 20
+# Default: hybrid search (dense + BM25 fusion)
+uv run atlas-evaluate \
+  --bundle ./data/snowflake-rag-bundle \
+  --golden ./data/golden_set.jsonl \
+  --prefer apple \
+  --top-k 5
+
+# Compare with pure dense vector search:
+uv run python -c "
+from atlas.rag_server import Bundle
+b = Bundle('./data/snowflake-rag-bundle', prefer='apple')
+results = b.search('how to create a virtual warehouse', top_k=20, mode='vector')
+for r in results:
+    print(f'{r[\"score\"]:.3f}  {r[\"file\"]}')
+"
 ```
 
-This measures **Precision@10** (fraction of top-10 results containing the
-query string) and **Mean Reciprocal Rank** (1/rank of first relevant result).
+This measures **Precision@k** (fraction of top-k results matching expected
+files) and **Mean Reciprocal Rank** (inverse rank of first relevant result)
+over the full golden set.
 
-The source is at `atlas/evaluate.py`.
+Add `--rerank` to use the cross-encoder re-ranker (slower but more
+accurate — re-scores top-100 candidates with a joint query-passage model).
+Uses MLX on Apple Silicon, ONNX elsewhere. Add `--output results.json`
+to save results to a file.
+
+The golden set is to be placed at `data/golden_set.jsonl`. Example:
+
+```jsonl
+{"query": "how to create a virtual warehouse in snowflake", "expected_files": ["user-guide/warehouses.md", "sql-reference/sql/create-warehouse.md", "user-guide/warehouses-tasks.md"], "expected_publications": ["markdown"]}
+{"query": "snowflake cortex agents setup and configuration", "expected_files": ["user-guide/snowflake-cortex/cortex-agents-setup.md", "user-guide/snowflake-cortex/cortex-agents.md"], "expected_publications": ["markdown"]}
+{"query": "loading data with snowpipe", "expected_files": ["user-guide/data-load-snowpipe-intro.md", "user-guide/data-load-snowpipe-rest-load.md", "user-guide/data-load-snowpipe-auto-s3.md"], "expected_publications": ["markdown"]}
+{"query": "dynamic tables overview and use cases", "expected_files": ["user-guide/dynamic-tables/overview.md", "user-guide/dynamic-tables/create.md", "user-guide/dynamic-tables/refresh-modes.md"], "expected_publications": ["markdown"]}
+{"query": "snowflake access control and roles", "expected_files": ["user-guide/security-access-control-overview.md", "user-guide/security-access-control-configure.md"], "expected_publications": ["markdown"]}
+{"query": "time travel and fail-safe in snowflake", "expected_files": ["user-guide/data-time-travel.md", "user-guide/data-availability.md", "user-guide/data-failsafe.md"], "expected_publications": ["markdown"]}
+{"query": "sharing data across snowflake accounts", "expected_files": ["user-guide/data-sharing-intro.md", "user-guide/data-sharing-provider.md", "user-guide/data-sharing-gs.md"], "expected_publications": ["markdown"]}
+{"query": "cortex search hybrid search", "expected_files": ["user-guide/snowflake-cortex/cortex-search/cortex-search-overview.md", "user-guide/snowflake-cortex/cortex-search/query-cortex-search-service.md"], "expected_publications": ["markdown"]}
+{"query": "vector embeddings snowflake", "expected_files": ["user-guide/snowflake-cortex/vector-embeddings.md", "user-guide/snowflake-cortex/cortex-rest-api/embed-api.md"], "expected_publications": ["markdown"]}
+{"query": "querying semi-structured json data", "expected_files": ["user-guide/querying-semistructured.md", "user-guide/semistructured-intro.md", "user-guide/semistructured-considerations.md"], "expected_publications": ["markdown"]}
+{"query": "apache iceberg tables in snowflake", "expected_files": ["user-guide/tables-iceberg.md", "user-guide/tables-iceberg-create.md", "user-guide/tables-iceberg-manage.md"], "expected_publications": ["markdown"]}
+{"query": "multi-cluster warehouses scaling", "expected_files": ["user-guide/warehouses-multicluster.md", "user-guide/warehouses.md"], "expected_publications": ["markdown"]}
+{"query": "bulk loading from s3", "expected_files": ["user-guide/data-load-s3.md", "user-guide/data-load-s3-config.md", "user-guide/data-load-s3-copy.md"], "expected_publications": ["markdown"]}
+{"query": "streams and tasks for data pipelines", "expected_files": ["user-guide/streams-intro.md", "user-guide/tasks-intro.md", "user-guide/tasks-graphs.md"], "expected_publications": ["markdown"]}
+{"query": "optimizing query performance", "expected_files": ["user-guide/performance-query-options.md", "user-guide/performance-query-warehouse.md", "user-guide/query-acceleration-service.md"], "expected_publications": ["markdown"]}
+{"query": "managing snowflake costs", "expected_files": ["user-guide/cost-optimize.md", "user-guide/cost-management-overview.md", "user-guide/cost-controlling.md"], "expected_publications": ["markdown"]}
+{"query": "search optimization service", "expected_files": ["user-guide/search-optimization-service.md", "user-guide/search-optimization/enabling.md"], "expected_publications": ["markdown"]}
+{"query": "clustering keys and micro-partitions", "expected_files": ["user-guide/tables-clustering-micropartitions.md", "user-guide/tables-clustering-keys.md", "user-guide/tables-auto-reclustering.md"], "expected_publications": ["markdown"]}
+{"query": "snowflake key concepts and architecture", "expected_files": ["user-guide/intro-key-concepts.md", "user-guide/intro-supported-features.md"], "expected_publications": ["markdown"]}
+{"query": "create table sql syntax", "expected_files": ["sql-reference/sql/create-table.md", "sql-reference/sql/create-table-as-select.md"], "expected_publications": ["markdown"]}
+```
+
+To add or customise queries, edit the file and re-run.
+
+The evaluator source is at `atlas/evaluate.py`.
 
 ---
 
-## 12. License
+## Contributing
+
+See the [development section](#10-development) for setup instructions. PRs
+and issues welcome. The test suite is `uv run pytest tests/ -v`.
+
+## License
 
 MIT License — see [LICENSE](LICENSE) file. The Snowflake documentation
 content is governed by the Snowflake legal terms.

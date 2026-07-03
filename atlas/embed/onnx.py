@@ -39,6 +39,13 @@ class OnnxEmbedder(Embedder):
         model_id: str | Path,
         prefer_gpu: bool = False,
     ) -> None:
+        """Initialize the ONNX embedder.
+
+        Args:
+            model_id: Local directory path or Hugging Face model ID.
+            prefer_gpu: If True, try CUDA execution provider first.
+
+        """
         self.model_id = str(model_id)
         self.prefer_gpu = prefer_gpu
 

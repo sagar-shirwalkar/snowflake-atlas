@@ -52,6 +52,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .bm25_search import build_index as build_bm25_index
+from .bm25_search import save_index as save_bm25_index
 from .chunk import chunk_file
 from .embed import (
     DEFAULT_MODEL_ID,
@@ -62,6 +64,12 @@ from .log import configure_logging, get_logger
 from .sources import GitSource, LocalSource, MarkdownSource, WebCrawlSource
 
 logger = get_logger()
+
+# ---------------------------------------------------------------------------
+# Build-time constants
+# ---------------------------------------------------------------------------
+
+_CLUSTER_BOOST_WEIGHT = 0.03  # sibling/path boost at query time
 
 DEFAULT_BRANCH = "main"
 DEFAULT_REPO_URL = "https://github.com/ServiceNow/ServiceNowDocs.git"
@@ -166,6 +174,7 @@ def ensure_repo(repo_path: Path, repo_url: str, branch: str) -> Path:
 
 
 def current_sha(repo_path: Path) -> str:
+    """Return the current git HEAD SHA for a repository."""
     return subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
         check=True,
@@ -191,10 +200,39 @@ def create_source(args: argparse.Namespace) -> MarkdownSource:
 
 
 def walk_markdown(source: MarkdownSource) -> list[Path]:
+    """Walk the source and return all markdown file paths."""
     return sorted(source.walk_markdown())
 
 
 def build_chunk_table(files: list[Path], source: MarkdownSource) -> pa.Table:
+    """Build the chunk table with metadata, including hierarchical cluster tags.
+
+    ``cluster_tags`` is a space-separated string of sibling document stems
+    in the same directory (excluding the document itself).  At query time
+    the RAG server does substring matching on this field to apply a small
+    relevance boost — a lightweight form of path-aware retrieval that
+    surfaces related docs from the same "neighbourhood".
+    """
+    repo_root = source.mirror_root if hasattr(source, 'mirror_root') else source.repo_path
+
+    # Pre-compute sibling map: dir_key -> set of .md stem names
+    sibling_map: dict[str, set[str]] = {}
+    for path in files:
+        try:
+            rel = path.relative_to(repo_root)
+        except ValueError:
+            continue
+        parts = rel.parts
+        if len(parts) < 2 or parts[0] != "markdown":
+            continue
+        # dir_key = path components between markdown/ and the filename
+        dir_key = "/".join(parts[1:-1]) if len(parts) > 2 else ""
+        sib_set = sibling_map.get(dir_key)
+        if sib_set is None:
+            sib_set = set()
+            sibling_map[dir_key] = sib_set
+        sib_set.add(path.stem)
+
     cols: dict[str, list] = {
         "id": [],
         "text": [],
@@ -206,13 +244,26 @@ def build_chunk_table(files: list[Path], source: MarkdownSource) -> pa.Table:
         "product_area": [],
         "last_updated": [],
         "canonical_url": [],
+        "cluster_tags": [],
     }
     for i, path in enumerate(files, 1):
         try:
-            chunks = chunk_file(path, source.mirror_root if hasattr(source, 'mirror_root') else source.repo_path)
+            chunks = chunk_file(path, repo_root)
         except Exception as e:
             logger.warning("Chunking failed", file=str(path), error=str(e))
             continue
+
+        # Compute cluster_tags for this file from the sibling map
+        try:
+            rel = path.relative_to(repo_root)
+            parts = rel.parts
+            dir_key = "/".join(parts[1:-1]) if len(parts) > 2 else ""
+            siblings = sibling_map.get(dir_key, set())
+            sibling_stems = sorted(s for s in siblings if s != path.stem)
+            cluster_tags = " ".join(sibling_stems)
+        except (ValueError, KeyError):
+            cluster_tags = ""
+
         for j, c in enumerate(chunks):
             text = c["text"]
             if not text.strip():
@@ -228,6 +279,7 @@ def build_chunk_table(files: list[Path], source: MarkdownSource) -> pa.Table:
             cols["product_area"].append(c["frontmatter"].get("product_area", ""))
             cols["last_updated"].append(str(c["frontmatter"].get("last_updated", "")))
             cols["canonical_url"].append(c["frontmatter"].get("canonical_url", ""))
+            cols["cluster_tags"].append(cluster_tags)
         if i % 500 == 0:
             logger.info("Chunking progress", files=i, total=len(files), chunks=len(cols["text"]))
     return pa.table(cols)
@@ -284,6 +336,7 @@ def save_bundle_artifacts(
 
 
 def sha256_file(path: Path) -> str:
+    """Compute the SHA-256 hex digest of a file."""
     h = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -300,6 +353,7 @@ def write_manifest(
     embedding_backend: str = "",
     embedding_active_provider: str = "",
 ) -> Path:
+    """Write the bundle manifest.json with metadata and artifact SHA256s."""
     release_info = source.get_release_info()
     manifest = {
         "schema_version": BUNDLE_SCHEMA_VERSION,
@@ -316,6 +370,7 @@ def write_manifest(
             "embeddings": "embeddings.f16.npy",
             "norms": "norms.f32.npy",
             "model_dir": "model/",
+            "bm25_index": "bm25.pkl",
         },
     }
     if embedding_backend:
@@ -334,6 +389,7 @@ def write_manifest(
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the bundle build command."""
     p = argparse.ArgumentParser(description="Build the Atlas RAG bundle")
     p.add_argument("--source-type", choices=["git", "web-crawl", "local"], default="git", help="Source type")
 
@@ -377,6 +433,14 @@ def _run() -> int:
     chunks_path = args.output / "chunks.parquet"
     pq.write_table(table, chunks_path)
     logger.info("Wrote chunks", path=str(chunks_path))
+
+    # Build BM25 keyword index from chunk texts
+    texts = table.column("text").to_pylist()
+    logger.info("Building BM25 index", count=len(texts))
+    bm25_index = build_bm25_index(texts)
+    bm25_path = args.output / "bm25.pkl"
+    save_bm25_index(bm25_index, bm25_path)
+    logger.info("Wrote BM25 index", path=str(bm25_path), size=f"{bm25_path.stat().st_size / 1024:.1f} KB")
 
     if args.skip_embed:
         logger.info("Skipping embedding (--skip-embed set)")

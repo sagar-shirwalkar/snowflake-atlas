@@ -190,6 +190,7 @@ async def _run_smoke_test(
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the smoke test command."""
     p = argparse.ArgumentParser(description="Run Atlas smoke tests")
     p.add_argument("--bundle", type=Path, required=True, help="Path to RAG bundle")
     p.add_argument("--source-type", choices=["git", "web-crawl", "local"], default="git")
@@ -217,6 +218,7 @@ def _run() -> int:
 
 
 def main() -> None:
+    """Entry point: run smoke tests and exit with status code."""
     sys.exit(_run())
 
 

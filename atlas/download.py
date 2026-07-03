@@ -42,12 +42,14 @@ def _http_download(url: str, dest: Path) -> None:
 
 
 def resolve_release(repo: str, tag: str | None) -> dict:
+    """Resolve a GitHub release dict by tag, or fetch the latest."""
     if tag:
         return _http_json(f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}")
     return _http_json(f"{GITHUB_API}/repos/{repo}/releases/latest")
 
 
 def find_bundle_asset(release: dict) -> dict:
+    """Find the first downloadable bundle asset in a release."""
     for asset in release.get("assets", []):
         if asset["name"].endswith((".tar.zst", ".tar.gz", ".zip")):
             return asset
@@ -104,6 +106,7 @@ def _existing_bundle_backup(output: Path, backup_root: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the download command."""
     p = argparse.ArgumentParser(description="Download an Atlas RAG bundle from GitHub Releases")
     p.add_argument("--repo", required=True, help="GitHub repo (owner/name)")
     p.add_argument("--tag", default=None, help="Release tag (default: latest)")

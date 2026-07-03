@@ -77,7 +77,7 @@ def search_bundle(bundle: dict, query: str, top_k: int = 10) -> list[dict[str, A
             "score": float(scores[i]),
             "publication": bundle["pub"][i],
             "file": bundle["file"][i],
-            "title": bundle["title"][i].as_py(),
+            "title": bundle["title"][i],
             "text": bundle["text"][i],
         })
     return results
@@ -122,7 +122,7 @@ def evaluate(bundle_dir: Path, golden_path: Path, top_k: int = 10, prefer: str =
         results = reranker.rerank(query, results, top_k=top_k) if reranker and results else results[:top_k]
 
         # Precision@k
-        retrieved_files = {f"{r['publication']}/{r['file']}" for r in results}
+        retrieved_files = {r['file'] for r in results}
         # Check file-level matches
         hits = retrieved_files & expected_files
         precision = len(hits) / top_k if top_k > 0 else 0
@@ -131,8 +131,7 @@ def evaluate(bundle_dir: Path, golden_path: Path, top_k: int = 10, prefer: str =
         # MRR - first relevant result
         mrr = 0.0
         for rank, r in enumerate(results, 1):
-            file_key = f"{r['publication']}/{r['file']}"
-            if file_key in expected_files:
+            if r['file'] in expected_files:
                 mrr = 1.0 / rank
                 break
             # Also check publication-level match
@@ -161,6 +160,7 @@ def evaluate(bundle_dir: Path, golden_path: Path, top_k: int = 10, prefer: str =
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the evaluate command."""
     p = argparse.ArgumentParser(description="Evaluate RAG quality (Precision@10, MRR)")
     p.add_argument("--bundle", type=Path, required=True, help="Path to RAG bundle")
     p.add_argument("--golden", type=Path, required=True, help="Path to golden set (JSONL)")
@@ -200,6 +200,7 @@ def _run() -> int:
 
 
 def main() -> None:
+    """Entry point: run evaluation and exit."""
     sys.exit(_run())
 
 

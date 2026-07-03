@@ -16,16 +16,19 @@ class LocalSource(MarkdownSource):
     """
 
     def __init__(self, mirror_root: Path, repo_url: str = "local://docs", branch: str = "local") -> None:
+        """Initialize the local directory source adapter."""
         self.mirror_root = Path(mirror_root).resolve()
         self.repo_url = repo_url
         self.branch = branch
 
     def walk_markdown(self) -> Iterator[Path]:
+        """Yield all ``.md`` file paths under the mirror root."""
         if not self.mirror_root.is_dir():
             raise FileNotFoundError(f"Mirror root not found: {self.mirror_root}")
         yield from sorted(self.mirror_root.rglob("*.md"))
 
     def get_metadata(self, path: Path) -> dict:
+        """Return publication, file path, and source info for a markdown file."""
         rel = path.relative_to(self.mirror_root)
         parts = rel.parts
         return {
@@ -37,6 +40,7 @@ class LocalSource(MarkdownSource):
         }
 
     def get_release_info(self) -> dict:
+        """Return branch, SHA, repo URL, and file count."""
         return {
             "branch": self.branch,
             "sha": "local",

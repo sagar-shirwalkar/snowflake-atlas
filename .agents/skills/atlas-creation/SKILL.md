@@ -16,6 +16,239 @@ This skill is **platform-agnostic**. Snowflake-specific, Kubernetes-specific, et
 
 ---
 
+## Advanced Retrieval Techniques (optional, build-time only)
+
+The base Atlas system uses dense embedding search with BM25 hybrid as default.
+The techniques below improve retrieval quality without adding any LLM calls at
+query time — all work happens once during bundle creation.
+
+---
+
+### 1. Chunk Overlap
+
+**Idea:** Adjacent H2 sections share a small text overlap (the tail of the previous
+section prepended to the next) so that queries straddling a section boundary still
+match. The overlap text is prepended without a special marker — the embedding model
+treats it as natural context.
+
+**Implementation:**
+
+- `atlas/chunk.py` extracts the last 150 chars (`_OVERLAP_CHARS`) of each H2
+  section via `_section_tail()`, word-broken cleanly.
+- `chunk_markdown()` prepends the tail to the next section before embedding.
+- Controlled by `overlap_chars` parameter (default 150).
+
+**Cost profile:** Zero at query time. Adds ~150 tokens per chunk boundary at build
+time (negligible memory/vector storage impact).
+
+---
+
+### 2. Hierarchical FS Chunking with Path Metadata
+
+**Idea:** The file-system hierarchy of the documentation corpus carries semantic
+information — documents in the same directory are about related topics, and sibling
+filenames form implicit clusters. This technique tags each chunk with its directory
+neighbourhood at build time, then applies a small relevance boost at query time.
+
+**Implementation (build-time):**
+
+- `atlas/make_bundle.py::build_chunk_table()` pre-computes a sibling map before
+  chunking: for each file, it collects the stems (filenames without `.md`) of all
+  other `.md` files in the same directory.
+- Each chunk gets a `cluster_tags` column: space-joined sibling stems (excluding
+  self). Example: a chunk from `provider-listings-auto-fulfillment-setup.md` in
+  `collaboration/views/` gets cluster_tags = `"provider-listings-auto-fulfillment provider-listings-auto-fulfillment-setup"`.
+- The column is stored in `chunks.parquet` alongside all other metadata.
+
+**Implementation (query-time):**
+
+- `Bundle.search()` does substring matching (`pc.match_substring`) on
+  `cluster_tags` against query tokens.
+- Matches get a small boost (`0.03` weight, vs `0.05` for title boost).
+- Graceful degradation: old bundles without `cluster_tags` skip the boost.
+
+**Cost profile:** Zero query-time LLM. Build-time overhead is negligible (set
+operations + one extra parquet column). Query-time adds one `pc.match_substring`
+pass per query token.
+
+---
+
+### 3. Hybrid Search as Default
+
+**Idea:** Dense embedding search captures semantic similarity but misses exact term
+matches. BM25 keyword search captures term precision but misses semantically related
+content. Reciprocal Rank Fusion (RRF) combines both. Making hybrid the default means
+clients get better recall without any configuration.
+
+**Implementation:**
+
+- `Bundle.search()` defaults `mode="hybrid"` in both `search_docs` and
+  `search_code` tools.
+- Fusion formula: `0.6 * dense_score + 0.4 * bm25_norm` (weights tuned empirically).
+- BM25 index built at bundle-build time via `rank-bm25::BM25Okapi` from chunk texts.
+- Graceful fallback: if `bm25.pkl` is missing (older bundles), hybrid falls back to
+  title-boost heuristic with a log warning.
+
+**Cost profile:** Zero query-time LLM. Build-time indexing is ~1-2s for 250k chunks.
+Query-time adds a BM25 score call (microseconds on the candidate pool).
+
+---
+
+### 4. Cross-Encoder Re-ranker (opt-in, MLX or ONNX)
+
+**Idea:** A cross-encoder jointly encodes the query and each candidate document,
+producing a relevance score that is more accurate than cosine similarity alone.
+Applied to the top-100 candidates from hybrid search, it eliminates false positives
+that rank high on embedding similarity but are actually irrelevant.
+
+**Implementation:**
+
+- `atlas/rerank_mlx.py` — `MlxCrossEncoderReranker` uses a BERT-base
+  classifier architecture (same BERT-base as the embedder) accelerated via MLX
+  on Apple Silicon.
+- `atlas/rerank.py` — `CrossEncoderReranker` uses ONNX Runtime (portable,
+  `cross-encoder/ms-marco-MiniLM-L6-v2`).
+- Runtime resolves: try MLX first, fall back to ONNX on `(ImportError,
+  FileNotFoundError, RuntimeError)`.
+- Enabled via `--rerank` flag on the RAG server (off by default — opt-in
+  because it adds ~45 MB RAM and ~5 ms/query).
+- Model weights: `BAAI/bge-reranker-v2-base` converted to MLX `.npy` format
+  via `tools/convert_reranker_to_mlx.py`.
+
+**Cost profile:** Zero LLM calls. Requires a pre-converted MLX weight cache or
+HF-downloaded ONNX model. Adds ~5 ms/query on Apple Silicon, ~50-200 ms on CPU.
+
+---
+
+### 5. Contextual Retrieval
+
+**Source:** [Anthropic Blog — Introducing Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval) (Sep 2024)
+
+**Idea:** A naive chunking strategy splits documents at heading boundaries, but many chunks become
+ambiguous when viewed in isolation — a code block showing `TO_DATE` usage, a table of SQL function
+signatures, a CLI command reference. These chunks carry no surrounding context about which section
+they belong to or what problem they solve.
+
+Contextual Retrieval solves this by having an LLM generate a short (50-100 token) **context snippet**
+for each chunk before embedding: a plain-text explanation of what the chunk is and how it relates
+to the overall document. This context is prepended to the chunk text before it enters the embedding
+model, so the vector representation captures both the chunk content _and_ its role in the document.
+
+**Claimed impact:** Anthropic reports up to **49% reduction in retrieval failure rate** compared to
+naive chunking without context — the single highest-leverage improvement in their test suite.
+
+**Status in Snowflake Atlas:** Planned, not yet implemented. Context generation requires LLM calls
+at build time, so it depends on provider selection (local via MLX, Claude API, OpenRouter, HF).
+The best-quality results come from frontier models (Claude 3.5 Haiku/Sonnet), but smaller local
+models (Qwen 2.5 7B, Phi-3-mini) can produce adequate context for simpler chunks. Consider
+Contextual Retrieval after the four build-time-only techniques above are exhausted.
+
+---
+
+#### Provider Options
+
+Context generation is a **build-time** step — it runs once per bundle release, so per-chunk cost
+matters less than context quality. Bad context pollutes the embedding and makes retrieval _worse_
+than no context at all. Choose the provider accordingly.
+
+| Provider | Models | Quality | Cost | Setup |
+|----------|--------|---------|------|-------|
+| **Local via MLX** | Qwen 9B, LLaMA 3.2, Phi-3-mini | Variable — test first | Free | `pip install mlx-lm`, no API key |
+| **Local via Ollama** | Any Ollama model | Variable — test first | Free | `ollama pull <model>`, no API key |
+| **Claude API** | Claude 3 Haiku / Sonnet | Highest | ~$1/M chunks w/ prompt caching | `ANTHROPIC_API_KEY` env var |
+| **OpenRouter** | Dozens of models, pay-per-token | Depends on model chosen | $0.15-2/M tokens (many free tier models) | `OPENROUTER_API_KEY` env var + `OPENROUTER_BASE_URL` |
+| **HuggingFace Inference** | Free serverless models (e.g. `HuggingFaceH4/zephyr-7b-beta`) | Lower — good for prototyping | Free (rate-limited) | `HF_TOKEN` env var (optional for free tier) |
+| **opencode** | Inherits the editor's configured provider | Same as whatever opencode uses | Same as whatever opencode uses | Auto — reads opencode config from `~/.config/opencode/` |
+
+**Recommendation:** Use Claude Haiku via API for the highest quality at low cost. Use a local
+model (via MLX or Ollama) when data must not leave the machine or for air-gapped deployments.
+OpenRouter and HF free tiers are good for prototyping. opencode integration is useful when the
+build runs in an environment already configured for the editor.
+
+---
+
+#### Implementation Pattern
+
+Context generation is a **build-time** step, integrated into Phase 6 (bundle builder) of the
+10-phase build process. It runs once per bundle release with zero query-time cost.
+
+**Security: API keys from environment only.** Never store API keys in
+`pyproject.toml`, `config.json`, or any file that could be committed. The build tool
+should fail early with a clear error if a required env var is missing:
+
+```python
+os.environ["ANTHROPIC_API_KEY"]  # raises KeyError if unset — fail fast
+```
+
+**Integration into bundle build:**
+
+```python
+# In make_bundle.py Phase 6, after chunking, before embedding:
+context_llm = get_context_llm(args.context_provider)
+for chunk in chunks:
+    context = generate_chunk_context(
+        chunk["text"], chunk["document"], chunk["section"], context_llm,
+    )
+    chunk["text"] = f"<context>{context}</context>\n{chunk['text']}"
+```
+
+The `--context-provider` CLI flag selects the backend; `--context-model` overrides the
+default model for that provider. Both are optional — when omitted, context generation is
+skipped entirely (maintaining backward compatibility).
+
+**Bundle considerations:** Context is prepended _before_ embedding, so the vector captures
+it. The stored text in `chunks.parquet` includes the context prefix. No bundle format
+change — the context becomes part of the chunk text.
+
+---
+
+#### When to use
+
+- **Build-time only** — context is generated once during bundle creation, not at query time.
+  The per-chunk LLM call adds to build time but costs nothing at query time.
+- **Essential for technical docs** where code blocks, SQL snippets, API signatures, and CLI
+  commands make up most of the content — these are the chunks that benefit most from
+  disambiguation.
+- **Skip** when your corpus is prose-heavy with long, self-contained paragraphs (blog posts,
+  essays) or when you cannot run an LLM during build (air-gapped build environment with no
+  local model available).
+
+---
+
+### Future: ColBERT Late Interaction
+
+**Source:** [ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction
+over BERT](https://arxiv.org/abs/2004.12832) (SIGIR'20)
+
+**Idea:** ColBERT replaces the single-score dot product of dense retrieval with a
+**late interaction** mechanism: each query token is compared against each document
+token independently, and the scores are summed (MaxSim). This preserves fine-grained
+term-level matching while still using contextualized BERT representations — bridging
+the gap between dense and sparse retrieval.
+
+**Tradeoff vs. cross-encoder reranker:** ColBERT is faster (can be fully indexed
+and searched in a single pass) but requires a specialized inference pipeline. The
+cross-encoder reranker is simpler to integrate as a second-pass re-ranker on top
+of existing dense+hybrid results.
+
+**Status in Snowflake Atlas:** Not implemented. ColBERT's late interaction is a
+promising direction for a future retrieval upgrade, particularly for the hybrid
+search pipeline where it could replace the separate BM25 + dense fusion with a
+single unified retriever.
+
+---
+
+### Summary: Which technique for what?
+
+| Goal | Technique | Effort | Impact | Cost profile |
+|------|-----------|--------|--------|-------------|
+| Seamless section boundaries | Chunk Overlap (#1) | Low | Medium | Build-time tail extraction, zero query cost |
+| Path-aware retrieval boost | Hierarchical FS Chunking (#2) | Low | Medium | Build-time sibling map, query-time substring match |
+| Maximum recall without config | Hybrid Search as Default (#3) | Low | High | Build-time BM25 indexing, zero query-time LLM |
+| Precision boost for top results | Cross-Encoder Reranker (#4) | Medium | High | Build-time weight conversion, passive at query |
+| Context-disambiguated chunks | Contextual Retrieval (#5) | High | High | Build-time LLM call per chunk, zero query-time cost |
+| Unified dense+sparse retrieval | ColBERT (Future) | High | High | Specialized indexing pipeline, single-pass search |
+
 ## Core concepts (leading words)
 
 - **dual-server** — FS for verbatim citations, RAG for fuzzy discovery
@@ -23,6 +256,10 @@ This skill is **platform-agnostic**. Snowflake-specific, Kubernetes-specific, et
 - **pinned** — source repo URL, branch, and git SHA recorded for reproducibility
 - **backend** — inference runtime resolved at run time: MLX, ONNX-CUDA, ONNX-CPU
 - **H2-chunk** — split on `## ` headers, parse YAML frontmatter, flag code chunks
+- **overlap** — tail of previous H2 section prepended to next for boundary-spanning queries (150 chars default)
+- **cluster-tags** — space-joined sibling document stems in the same directory, used for path-aware relevance boost
+- **hybrid-default** — RAG server defaults to hybrid (dense + BM25) mode; client can override per-query
+- **reranker** — optional cross-encoder (MLX or ONNX) that re-scores top-100 candidates for precision
 - **doctor** — diagnostic probe (`atlas-doctor`) showing platform, backend probes, selected backend + reason
 - **source-adapter** — pluggable interface to fetch markdown from git, web crawl, local dir, or API
 
@@ -34,14 +271,14 @@ This skill is **platform-agnostic**. Snowflake-specific, Kubernetes-specific, et
 |-------|------|---------------------|
 | 0 | Prerequisites | `python3 uv rg git` available; Python 3.11+ |
 | 1 | Scaffold project | `pyproject.toml` with entry points + deps; `atlas/__init__.py` |
-| 2 | Chunker (`atlas/chunk.py`) | `chunk_file()` returns dicts with 10 required keys; H2-boundary split |
+| 2 | Chunker (`atlas/chunk.py`) | `chunk_file()` returns dicts with 10 required keys; H2-boundary split + chunk overlap (150 chars) |
 | 3 | Embedding backends (`atlas/embed/`) | 3 backends (MLX, ONNX-CUDA, ONNX-CPU); factory picks best at runtime |
 | 4 | FS MCP server (`atlas/fs_server.py`) | 5 tools registered; deterministic; ripgrep-backed; path traversal blocked |
-| 5 | RAG MCP server (`atlas/rag_server.py`) | 4 tools registered; bundle loaded once; cosine via matrix multiply; hybrid modes |
-| 6 | Bundle builder (`atlas/make_bundle.py`) | End-to-end: fetch → chunk → embed → write artifacts → stage model → manifest w/ SHA256 |
+| 5 | RAG MCP server (`atlas/rag_server.py`) | 4 tools registered; bundle loaded once; cosine via matrix multiply; hybrid as default mode |
+| 6 | Bundle builder (`atlas/make_bundle.py`) | End-to-end: fetch → chunk (w/ overlap + cluster_tags) → embed → BM25 index → write artifacts → stage model → manifest w/ SHA256 |
 | 7 | Download + verify (`atlas/download.py`) | GitHub Releases download; SHA256 verify; backup existing before overwrite |
-| 8 | Utilities | backup, restore, doctor, smoke_test, evaluate, log, rerank — all working standalone |
-| 9 | Tests (`tests/`) | Pytest suite passes: chunker, embed backends, FS/RAG servers, bundle build, download |
+| 8 | Utilities | backup, restore, doctor, smoke_test, evaluate, log, rerank (MLX + ONNX) — all working standalone |
+| 9 | Tests (`tests/`) | Pytest suite passes: chunker (incl. overlap), embed backends, FS/RAG servers, bundle build, BM25, reranker |
 | 10 | CI + Release | GitHub Actions smoke test; `scripts/publish-bundle.sh` creates release |
 
 ---

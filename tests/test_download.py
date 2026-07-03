@@ -126,7 +126,8 @@ class TestExtract:
     def test_tar_gz_with_prefix(self, tmp_path: Path):
         """Real bundle tars have a top-level dir.  _extract strips it via
         --strip-components=1 for tar.zst but for tar.gz it uses
-        extractall, which preserves the tar's internal structure."""
+        extractall, which preserves the tar's internal structure.
+        """
         archive = tmp_path / "test.tar.gz"
         self._make_tar_with_prefix(
             archive,

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Snowflake Documentation Crawler — Stealth Edition
+"""Snowflake Documentation Crawler — Stealth Edition
 
 Mirrors all docs from https://docs.snowflake.com/ to a local markdown/ directory
 compatible with atlas-build (expects markdown/<publication>/*.md structure).

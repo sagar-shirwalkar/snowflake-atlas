@@ -46,7 +46,7 @@ def create_source(
     mirror_path: str | None = None,
     crawl_meta: str | None = None,
 ) -> MarkdownSource:
-    """Factory for source adapters."""
+    """Create a :class:`MarkdownSource` adapter from CLI parameters."""
     if source_type == "git":
         if not repo_path or not repo_url or not branch:
             raise ValueError("git source requires --repo-path, --repo-url, --branch")
@@ -81,6 +81,7 @@ def _parse_md(path: Path) -> dict[str, Any]:
 
 
 def list_publications(source: MarkdownSource) -> list[dict[str, Any]]:
+    """List all documentation publications with file counts."""
     pubs: dict[str, int] = {}
     for f in source.walk_markdown():
         rel = f.relative_to(source.mirror_root if hasattr(source, 'mirror_root') else source.repo_path / "markdown")
@@ -90,6 +91,7 @@ def list_publications(source: MarkdownSource) -> list[dict[str, Any]]:
 
 
 def list_publication_files(source: MarkdownSource, publication: str) -> list[dict[str, Any]]:
+    """List all files in a publication with frontmatter metadata."""
     pub_dir = None
     if hasattr(source, 'mirror_root'):
         pub_dir = source.mirror_root / publication
@@ -119,6 +121,7 @@ def list_publication_files(source: MarkdownSource, publication: str) -> list[dic
 
 
 def read_publication_file(source: MarkdownSource, publication: str, file: str, max_chars: int = 50_000) -> dict[str, Any]:
+    """Read a markdown file from a publication, with path traversal protection."""
     if hasattr(source, 'mirror_root'):
         base = source.mirror_root
     elif hasattr(source, 'repo_path'):
@@ -126,9 +129,21 @@ def read_publication_file(source: MarkdownSource, publication: str, file: str, m
     else:
         raise ValueError("Unknown source type")
 
-    target = (base / publication / file).resolve()
+    # Resolve the base directory first so traversal can't escape it
+    base = base.resolve()
+
+    # Reject path traversal in publication: no ".." components, no absolute paths
+    if ".." in publication.split("/") or publication.startswith("/"):
+        raise ValueError("Invalid publication name")
+
     pub_root = (base / publication).resolve()
-    if not str(target).startswith(str(pub_root)):
+    # Verify pub_root is within the intended base directory
+    if not str(pub_root).startswith(str(base) + "/"):
+        raise ValueError("Path traversal detected in publication")
+
+    target = (pub_root / file).resolve()
+    # Verify target is within the publication root
+    if not str(target).startswith(str(pub_root) + "/"):
         raise ValueError("Path traversal blocked")
     if not target.is_file():
         raise FileNotFoundError(f"{publication}/{file} not found")
@@ -159,6 +174,7 @@ def _git(*args: str, cwd: Path) -> str:
 
 
 def get_release_info(source: MarkdownSource) -> dict[str, Any]:
+    """Return the source release metadata (branch, SHA, file count)."""
     return source.get_release_info()
 
 
@@ -169,6 +185,19 @@ def full_text_search(
     regex: bool = False,
     max_results: int = 50,
 ) -> list[dict[str, Any]]:
+    """Full-text search over the documentation using ripgrep.
+
+    Args:
+        source: The markdown source to search.
+        query: Search query (literal or regex depending on ``regex`` flag).
+        scope: Optional publication folder to restrict search to.
+        regex: If True, treat ``query`` as a regex pattern.
+        max_results: Maximum number of results to return.
+
+    Returns:
+        List of result dicts with ``file``, ``line``, and ``preview`` keys.
+
+    """
     if not shutil.which("rg"):
         raise RuntimeError("ripgrep (rg) not installed. Install via `brew install ripgrep`.")
 
@@ -180,14 +209,21 @@ def full_text_search(
         raise ValueError("Unknown source type")
 
     if scope:
-        search_root = search_root / scope
+        # Resolve base first, then verify scope stays within the doc tree
+        search_root = search_root.resolve()
+        candidate = (search_root / scope).resolve()
+        if not str(candidate).startswith(str(search_root) + "/"):
+            raise ValueError("Scope path traversal blocked")
+        search_root = candidate
+
     if not search_root.is_dir():
         raise FileNotFoundError(f"Scope not found: {scope}")
 
     cmd = ["rg", "--no-heading", "--line-number", "--color", "never"]
     if not regex:
         cmd.append("--fixed-strings")
-    cmd.extend(["--max-count", "1", query, str(search_root)])
+    # Use -- to prevent query from being interpreted as rg flags
+    cmd.extend(["--max-count", "1", "--", query, str(search_root)])
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     hits: list[dict[str, Any]] = []
@@ -235,6 +271,7 @@ def _result(payload: Any) -> list[TextContent]:
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
+    """Declare the five filesystem server tools (MCP list_tools handler)."""
     return [
         Tool(
             name="list_publications",
@@ -304,11 +341,13 @@ _source: MarkdownSource | None = None
 
 
 def set_source(src: MarkdownSource) -> None:
+    """Set the global source adapter instance."""
     global _source
     _source = src
 
 
 def get_source() -> MarkdownSource:
+    """Return the global source adapter, raising if not set."""
     if _source is None:
         raise RuntimeError("Source not initialized. Call set_source() first.")
     return _source
@@ -316,6 +355,7 @@ def get_source() -> MarkdownSource:
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Route tool calls to the appropriate handler (MCP call_tool handler)."""
     cid = str(uuid.uuid4())[:8]
     structlog.contextvars.bind_contextvars(correlation_id=cid)
     _start = time.perf_counter()
@@ -358,6 +398,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the filesystem MCP server."""
     p = argparse.ArgumentParser(description="Atlas filesystem MCP server")
     p.add_argument("--source-type", choices=["git", "web-crawl", "local"], default="git")
     p.add_argument("--repo-path", help="Path to git repo (git source)")
@@ -369,11 +410,13 @@ def parse_args() -> argparse.Namespace:
 
 
 async def serve() -> None:
+    """Run the filesystem server over stdio (MCP transport)."""
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
 def main() -> None:
+    """Entry point: configure, parse args, and run the server."""
     configure_logging()
     args = parse_args()
     source = create_source(

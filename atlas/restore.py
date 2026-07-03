@@ -39,6 +39,7 @@ def restore_snapshot(snapshot_path: Path, target_dir: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the restore command."""
     p = argparse.ArgumentParser(description="Roll back to a previous bundle snapshot")
     p.add_argument("--snapshot", type=Path, required=True, help="Path to snapshot .tar.gz")
     p.add_argument("--target", type=Path, required=True, help="Target directory to restore to")
@@ -52,6 +53,7 @@ def _run() -> int:
 
 
 def main() -> None:
+    """Entry point: restore a snapshot and exit."""
     sys.exit(_run())
 
 

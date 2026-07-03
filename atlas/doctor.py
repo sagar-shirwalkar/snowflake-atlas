@@ -167,6 +167,11 @@ def _probe_disk_free() -> dict[str, Any]:
 
 
 def run_diagnosis(bundle: Path | None = None, force: bool = False) -> dict[str, Any]:
+    """Probe the system and return a structured diagnosis report.
+
+    Results are cached to ``~/.cache/atlas/diagnosis.json`` with a 24-hour
+    TTL. Pass ``force=True`` to re-probe unconditionally.
+    """
     if not force and CACHE_PATH.is_file():
         try:
             cached = json.loads(CACHE_PATH.read_text())
@@ -210,6 +215,7 @@ def _fmt_bool(b: bool) -> str:
 
 
 def print_report(report: dict[str, Any]) -> None:
+    """Print a human-readable diagnosis report to stdout."""
     print()
     print("=" * 64)
     print(f"  Snowflake Atlas v{report.get('version', '?')} — installation diagnosis")
@@ -286,6 +292,7 @@ def print_report(report: dict[str, Any]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the doctor command."""
     p = argparse.ArgumentParser(description="Diagnose the Atlas installation")
     p.add_argument("--bundle", type=Path, help="Optional path to a RAG bundle to verify")
     p.add_argument("--refresh", action="store_true", help="Re-probe instead of using cache")
@@ -304,6 +311,7 @@ def _run() -> int:
 
 
 def main() -> None:
+    """Entry point: run diagnosis and exit."""
     sys.exit(_run())
 
 

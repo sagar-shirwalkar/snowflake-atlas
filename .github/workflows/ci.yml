@@ -28,5 +28,8 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: Check for unfixed violations (diff mode)
+        run: uv run ruff check --diff .
+
       - name: Run tests
         run: uv run pytest tests/ -v

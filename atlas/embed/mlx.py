@@ -145,6 +145,7 @@ class BgeModel:
         ff_dim: int = 3072,
         max_seq: int = 512,
     ):
+        """Initialize the BGE model with configurable architecture."""
         _mx, nn = _import_mlx()
         self.word_embeddings = nn.Embedding(vocab_size, dim)
         self.position_embeddings = nn.Embedding(max_seq, dim)
@@ -153,6 +154,10 @@ class BgeModel:
         self.encoder_layers = [_BertLayer(dim, n_heads, ff_dim) for _ in range(n_layers)]
 
     def __call__(self, input_ids, attention_mask, token_type_ids=None):
+        """Forward pass through the BERT encoder.
+
+        Returns hidden states of shape ``(batch, seq_len, dim)``.
+        """
         mx, _ = _import_mlx()
         B, L = input_ids.shape
         positions = mx.broadcast_to(mx.arange(L)[None, :], (B, L))
@@ -234,6 +239,13 @@ class MlxEmbedder(Embedder):
     backend = "mlx"
 
     def __init__(self, model_dir: str | Path) -> None:
+        """Initialize the MLX embedder.
+
+        Args:
+            model_dir: Local directory with ``.npy`` weight files, or a
+                Hugging Face model ID (resolved via ``DEFAULT_MLX_CACHE``).
+
+        """
         mx, _ = _import_mlx()
 
         # Resolve model_dir: either a local dir with .npy weights, or
@@ -285,6 +297,10 @@ class MlxEmbedder(Embedder):
         return self.model(input_ids, attention_mask, token_type_ids)
 
     def embed(self, texts: list[str]) -> np.ndarray:
+        """Embed a batch of texts via the MLX BERT model.
+
+        Returns L2-normalized float32 vectors of shape ``(n, 768)``.
+        """
         if not texts:
             return np.zeros((0, self.dim), dtype=np.float32)
         mx, _ = _import_mlx()

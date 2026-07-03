@@ -52,6 +52,7 @@ _CANONICAL_CHOICE = {
 
 
 def is_apple_silicon() -> bool:
+    """Return True if running on Apple Silicon (M-series)."""
     return platform.system() == "Darwin" and platform.machine() == "arm64"
 
 
@@ -101,6 +102,7 @@ def has_nvidia_gpu() -> bool:
 
 
 def has_mlx() -> bool:
+    """Return True if the MLX package is importable."""
     try:
         import mlx.core  # noqa: F401
 
@@ -110,6 +112,7 @@ def has_mlx() -> bool:
 
 
 def has_onnxruntime_gpu() -> bool:
+    """Return True if ONNX Runtime can use a CUDA execution provider."""
     try:
         import onnxruntime as ort  # noqa: F401
 
@@ -213,8 +216,10 @@ class Embedder(ABC):
 
     @abstractmethod
     def embed(self, texts: list[str]) -> np.ndarray:
-        """Embed a batch of texts. Returns shape ``(n, dim)`` float32,
-        L2-normalized (unit vectors)."""
+        """Embed a batch of texts.
+
+        Returns shape ``(n, dim)`` float32, L2-normalized (unit vectors).
+        """
 
     def embed_with_progress(
         self,
@@ -283,7 +288,7 @@ class Embedder(ABC):
 
 
 def mean_pool(last_hidden: np.ndarray, attention_mask: np.ndarray) -> np.ndarray:
-    """Mean-pool token embeddings, respecting the attention mask."""
+    """Mean-pool token embeddings over non-padded positions."""
     mask = attention_mask[..., None].astype(np.float32)
     summed = (last_hidden * mask).sum(axis=1)
     counts = mask.sum(axis=1).clip(min=1e-9)
@@ -291,13 +296,20 @@ def mean_pool(last_hidden: np.ndarray, attention_mask: np.ndarray) -> np.ndarray
 
 
 def l2_normalize(x: np.ndarray) -> np.ndarray:
-    """L2-normalize rows of a 2D array. Output is float32."""
+    """L2-normalize rows of a 2D array.
+
+    Each row is divided by its L2 norm (clipped to 1e-12). Returns float32.
+    """
     norms = np.linalg.norm(x, axis=-1, keepdims=True).clip(min=1e-12)
     return (x / norms).astype(np.float32)
 
 
 def load_embeddings(bundle_dir: Path) -> np.ndarray:
-    """Load embeddings from a bundle, preferring float16."""
+    """Load embeddings from a bundle directory.
+
+    Prefers ``embeddings.f16.npy`` (loaded as float32), falls back to
+    ``embeddings.f32.npy``. Raises ``FileNotFoundError`` if neither exists.
+    """
     f16 = bundle_dir / "embeddings.f16.npy"
     if f16.is_file():
         return np.load(f16).astype(np.float32)

@@ -38,6 +38,8 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from .bm25_search import rehydrate as load_bm25_index
+from .bm25_search import score_index as bm25_score
 from .embed import (
     DEFAULT_MODEL_ID,
     get_embedder,
@@ -47,12 +49,29 @@ from .embed import (
 from .log import configure_logging, get_logger
 from .rerank import CrossEncoderReranker
 
+# MLX reranker is optional — falls back to ONNX if not available
+try:
+    from .rerank_mlx import MlxCrossEncoderReranker as _MlxReranker
+
+    _HAS_MLX_RERANKER = True
+except ImportError:
+    _MlxReranker = None  # type: ignore[assignment]
+    _HAS_MLX_RERANKER = False
+
 app = Server("snowflake-rag")
 logger = get_logger()
 
 
 class Bundle:
+    """In-memory RAG bundle: embeddings, BM25 index, metadata.
+
+    Loads a pre-built bundle from disk and exposes ``search()`` and
+    ``get_chunk()`` methods for the RAG MCP server.  Supports vector,
+    keyword, and hybrid search modes.
+    """
+
     def __init__(self, bundle_dir: Path | str, prefer: str = "auto") -> None:
+        """Load a bundle from disk, resolving embedder and BM25 index."""
         self.bundle_dir = Path(bundle_dir).resolve()
         manifest_path = self.bundle_dir / "manifest.json"
         if not manifest_path.is_file():
@@ -99,6 +118,21 @@ class Bundle:
         self._last_updated = table.column("last_updated").to_pylist()
         self._canonical_urls = table.column("canonical_url").to_pylist()
 
+        # Hierarchical cluster tags (sibling stems for path-aware boost)
+        if "cluster_tags" in table.column_names:
+            self._cluster_tags_pa = table.column("cluster_tags")
+        else:
+            self._cluster_tags_pa = None
+
+        # Load BM25 index for keyword / hybrid search modes
+        bm25_path = self.bundle_dir / "bm25.pkl"
+        if bm25_path.is_file():
+            self._bm25 = load_bm25_index(bm25_path)
+            logger.info("Loaded BM25 index", path=str(bm25_path))
+        else:
+            self._bm25 = None
+            logger.info("No BM25 index found — keyword/hybrid fallback to title boost only")
+
     @staticmethod
     def _title_boost(titles: list[str], query_tokens: set[str]) -> np.ndarray:
         boost = np.zeros(len(titles), dtype=np.float32)
@@ -115,14 +149,38 @@ class Bundle:
         product_area: str | None = None,
         is_code: bool | None = None,
         min_score: float = 0.0,
-        mode: str = "vector",
+        mode: str = "hybrid",
         candidate_k: int | None = None,
     ) -> list[dict[str, Any]]:
+        """Search the bundle using vector, keyword, or hybrid mode.
+
+        Args:
+            query: Natural language search query.
+            top_k: Number of results to return.
+            publication: Filter by publication name.
+            product_area: Filter by product area.
+            is_code: Filter to code chunks only.
+            min_score: Minimum similarity score threshold.
+            mode: ``"vector"``, ``"keyword"``, or ``"hybrid"`` (default).
+            candidate_k: Internal candidate pool size (for reranking).
+
+        Returns:
+            List of result dicts with chunk metadata and scores.
+
+        """
         q = self.embedder.embed([query])[0]
         vec_scores = (self.embeddings @ q).flatten() / self._norms_safe
         query_tokens = set(query.lower().split())
         tb = self._title_boost(self._titles_pa, query_tokens) if query_tokens else 0.0
         boosted = vec_scores + tb
+
+        # Hierarchical cluster boost: sibling stem tokens in the same dir
+        if query_tokens and self._cluster_tags_pa is not None:
+            sb = np.zeros(self._n, dtype=np.float32)
+            for t in query_tokens:
+                matches = pc.match_substring(self._cluster_tags_pa, t)
+                sb += matches.cast("float32").to_numpy()
+            boosted += sb * 0.03
 
         mask = np.ones(self._n, dtype=bool)
         if publication:
@@ -158,10 +216,15 @@ class Bundle:
             pool_idx = pool_idx[order]
             return self._collect(min_score, boosted[pool_idx], boosted[pool_idx], top_k)
 
-        kw_raw = np.array(
-            [sum(t in self._texts[i].lower() for t in query_tokens) for i in pool_idx],
-            dtype=np.float32,
-        )
+        # Compute BM25 scores for the candidate pool (or fall back to token counting)
+        if self._bm25 is not None:
+            all_kw = bm25_score(self._bm25, query)
+            kw_raw = all_kw[pool_idx]
+        else:
+            kw_raw = np.array(
+                [sum(t in self._texts[i].lower() for t in query_tokens) for i in pool_idx],
+                dtype=np.float32,
+            )
 
         if mode == "keyword":
             scores = kw_raw + tb[pool_idx]
@@ -211,6 +274,7 @@ class Bundle:
         return results
 
     def get_chunk(self, chunk_id: str) -> dict[str, Any] | None:
+        """Return a single chunk by its ID, or None if not found."""
         i = self._id_to_idx.get(chunk_id)
         if i is None:
             return None
@@ -234,6 +298,7 @@ def _result(payload: Any) -> list[TextContent]:
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
+    """Declare the RAG server tools (MCP list_tools handler)."""
     return [
         Tool(
             name="search_docs",
@@ -246,7 +311,7 @@ async def list_tools() -> list[Tool]:
                     "publication": {"type": "string"},
                     "product_area": {"type": "string"},
                     "min_score": {"type": "number", "default": 0.0, "minimum": -1.0, "maximum": 1.0},
-                    "mode": {"type": "string", "enum": ["vector", "hybrid", "keyword"], "default": "vector"},
+                    "mode": {"type": "string", "enum": ["vector", "hybrid", "keyword"], "default": "hybrid"},
                 },
                 "required": ["query"],
             },
@@ -261,7 +326,7 @@ async def list_tools() -> list[Tool]:
                     "top_k": {"type": "integer", "default": 5, "minimum": 1, "maximum": 50},
                     "publication": {"type": "string"},
                     "min_score": {"type": "number", "default": 0.0},
-                    "mode": {"type": "string", "enum": ["vector", "hybrid", "keyword"], "default": "vector"},
+                    "mode": {"type": "string", "enum": ["vector", "hybrid", "keyword"], "default": "hybrid"},
                 },
                 "required": ["query"],
             },
@@ -284,12 +349,13 @@ async def list_tools() -> list[Tool]:
 
 
 _bundle_instance: Bundle | None = None
-_reranker: CrossEncoderReranker | None = None
+_reranker: CrossEncoderReranker | Any | None = None
 _bundle_lock = asyncio.Lock()
 _reranker_lock = asyncio.Lock()
 
 
 async def _bundle_cache(bundle_arg: str, prefer: str) -> Bundle:
+    """Lazily initialise and cache the :class:`Bundle` singleton."""
     global _bundle_instance
     if _bundle_instance is not None:
         return _bundle_instance
@@ -305,18 +371,29 @@ async def _bundle_cache(bundle_arg: str, prefer: str) -> Bundle:
     return _bundle_instance
 
 
-async def _get_reranker() -> CrossEncoderReranker | None:
+async def _get_reranker() -> Any | None:
+    """Lazily load and cache the cross-encoder reranker (MLX or ONNX)."""
     global _reranker
     if _reranker is not None or not _get_args().rerank:
         return _reranker
     async with _reranker_lock:
         if _reranker is not None:
             return _reranker
+        # Try MLX first (Apple Silicon), fall back to ONNX
+        if _HAS_MLX_RERANKER:
+            try:
+                _reranker = _MlxReranker()
+                logger.info("Loaded MLX cross-encoder reranker (ANE/GPU)")
+                return _reranker
+            except (ImportError, FileNotFoundError, RuntimeError) as e:
+                logger.info("MLX reranker unavailable, falling back to ONNX", error=str(e))
         _reranker = CrossEncoderReranker()
+        logger.info("Loaded ONNX cross-encoder reranker (CPU)")
     return _reranker
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the RAG MCP server."""
     p = argparse.ArgumentParser(description="Atlas RAG MCP server")
     p.add_argument(
         "--bundle",
@@ -350,6 +427,7 @@ def _get_args() -> argparse.Namespace:
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+    """Route tool calls to search/code/chunk/info handlers (MCP call_tool handler)."""
     cid = str(uuid.uuid4())[:8]
     structlog.contextvars.bind_contextvars(correlation_id=cid)
     _start = time.perf_counter()
@@ -372,7 +450,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             "publication": arguments.get("publication"),
             "product_area": arguments.get("product_area"),
             "min_score": arguments.get("min_score", 0.0),
-            "mode": arguments.get("mode", "vector"),
+            "mode": arguments.get("mode", "hybrid"),
         }
 
         if name == "search_docs":
@@ -411,11 +489,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def serve() -> None:
+    """Run the RAG server over stdio (MCP transport)."""
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
 def main() -> None:
+    """Entry point: configure logging, parse args, and run the server."""
     configure_logging()
     # Ensure args are parsed before serving (triggers lazy init)
     _ = _get_args()

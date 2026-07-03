@@ -33,7 +33,6 @@ def test_is_apple_silicon_true_on_mac_arm():
 
 def test_is_apple_silicon_mocked():
     """Check the logic independent of the actual host."""
-
     orig_system = platform.system
     orig_machine = platform.machine
     try:

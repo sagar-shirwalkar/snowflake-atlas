@@ -20,6 +20,7 @@ class WebCrawlSource(MarkdownSource):
     """
 
     def __init__(self, mirror_root: Path, crawl_meta_path: Path | None = None) -> None:
+        """Initialize the web crawl source adapter."""
         self.mirror_root = Path(mirror_root).resolve()
         self.crawl_meta = self._load_meta(crawl_meta_path)
 
@@ -36,11 +37,13 @@ class WebCrawlSource(MarkdownSource):
         }
 
     def walk_markdown(self) -> Iterator[Path]:
+        """Yield all ``.md`` file paths under the mirror root."""
         if not self.mirror_root.is_dir():
             raise FileNotFoundError(f"Mirror root not found: {self.mirror_root}")
         yield from sorted(self.mirror_root.rglob("*.md"))
 
     def get_metadata(self, path: Path) -> dict:
+        """Return publication, file path, and source info for a markdown file."""
         rel = path.relative_to(self.mirror_root)
         parts = rel.parts
         return {
@@ -52,6 +55,7 @@ class WebCrawlSource(MarkdownSource):
         }
 
     def get_release_info(self) -> dict:
+        """Return crawl source URL, branch, SHA, and file count."""
         return {
             "branch": f"crawl-{self.crawl_meta.get('crawled_at', 'unknown')[:10]}",
             "sha": self.crawl_meta.get("crawler_sha", "unknown"),

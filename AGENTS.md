@@ -36,6 +36,9 @@ must not be used unless the user explicitly names them.
 | `python-testing` | model-invoked | pytest, TDD, fixtures, mocking, parametrization |
 | `readme-writing` | model-invoked | Create, rewrite, or audit README / documentation |
 | `agent-handoff` | model-invoked | Compact conversation into a handoff document |
+| `embedding-strategies` | model-invoked | Select and optimize embedding models for semantic search and RAG |
+| `eval-driven-dev` | model-invoked | Set up eval-driven dev with pixie-qa for Python LLM apps |
+| `security-review` | model-invoked | Security vulnerability scan for codebases — injection, auth, crypto, secrets, deps |
 | `skill-compliance` | model-invoked | Audit skill compliance across 6 dimensions |
 | `skill-writing` | **user-invoked** | Reference for writing/editing skills. **Do not invoke unless the user explicitly names this skill.** |
 

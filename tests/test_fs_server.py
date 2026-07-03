@@ -179,6 +179,16 @@ class TestReadPublicationFile:
         with pytest.raises(ValueError, match="Path traversal blocked"):
             read_publication_file(source, "test-pub", "../../etc/passwd")
 
+    def test_path_traversal_blocked_absolute(self, source, tmp_path: Path):
+        """Absolute paths in publication should be blocked."""
+        with pytest.raises(ValueError, match="Invalid publication name"):
+            read_publication_file(source, "/etc", "passwd")
+
+    def test_path_traversal_blocked_double_dot_publication(self, source, tmp_path: Path):
+        """Publication with '..' should be blocked."""
+        with pytest.raises(ValueError, match="Invalid publication name"):
+            read_publication_file(source, "../../etc/passwd", "shadow")
+
     def test_file_not_found(self, source, tmp_path: Path):
         with pytest.raises(FileNotFoundError):
             read_publication_file(source, "test-pub", "nonexistent.md")
@@ -233,6 +243,71 @@ class TestFullTextSearch:
     def test_search_respects_max_results(self, source, tmp_path: Path):
         results = full_text_search(source, "the", max_results=1)
         assert len(results) <= 1
+
+    def test_scope_traversal_blocked(self, source, tmp_path: Path):
+        """Scope outside the doc tree should raise ValueError."""
+        with pytest.raises(ValueError, match="traversal blocked"):
+            full_text_search(source, "test", scope="../outside")
+
+    def test_scope_traversal_blocked_absolute(self, source, tmp_path: Path):
+        """Absolute path scope outside the doc tree should be blocked."""
+        with pytest.raises(ValueError, match="traversal blocked"):
+            full_text_search(source, "test", scope="/etc/passwd")
+
+    def test_scope_double_dot_blocked(self, source, tmp_path: Path):
+        """Scope with '..' prefix should be blocked."""
+        with pytest.raises(ValueError, match="traversal blocked"):
+            full_text_search(source, "test", scope="../../etc/passwd")
+
+    def test_scope_valid_within_docs(self, source, tmp_path: Path):
+        """Scope within the doc tree should work."""
+        results = full_text_search(source, "install", scope="docs")
+        assert len(results) >= 1
+
+
+class TestRipgrepSecurity:
+    def test_sentinel_before_query(self):
+        """The rg command should include '--' before the query to prevent flag injection."""
+        import shutil
+        import subprocess
+
+        if not shutil.which("rg"):
+            pytest.skip("ripgrep not installed")
+
+        from atlas.fs_server import full_text_search
+
+        original_run = subprocess.run
+        captured_cmd = None
+
+        def _capture_run(cmd, *args, **kwargs):
+            nonlocal captured_cmd
+            captured_cmd = cmd
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        subprocess.run = _capture_run
+        try:
+            import tempfile
+            from pathlib import Path
+
+            from atlas.sources import LocalSource
+
+            with tempfile.TemporaryDirectory() as td:
+                d = Path(td) / "docs"
+                d.mkdir()
+                (d / "test.md").write_text("content")
+                source = LocalSource(Path(td))
+                full_text_search(source, "test-query", scope="docs")
+                assert captured_cmd is not None, "subprocess.run was not called"
+                assert "--" in captured_cmd, (
+                    f"Expected '--' sentinel in rg command, got: {captured_cmd}"
+                )
+                dash_idx = captured_cmd.index("--")
+                query_idx = captured_cmd.index("test-query")
+                assert query_idx == dash_idx + 1, (
+                    f"Query must immediately follow '--' sentinel, got: {captured_cmd}"
+                )
+        finally:
+            subprocess.run = original_run
 
 
 # ---------------------------------------------------------------------------

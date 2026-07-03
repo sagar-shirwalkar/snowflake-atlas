@@ -1,0 +1,937 @@
+# Snowflake Atlas
+
+*Local-first AI knowledge layer for Snowflake documentation via MCP.*
+
+Atlas is a local-first knowledge layer for Snowflake development. Two
+[Model Context Protocol](https://modelcontextprotocol.io) servers expose
+the entire [Snowflake documentation](https://docs.snowflake.com/) to any AI agent:
+
+- **snowflake-fs** — deterministic filesystem server backed by `ripgrep`. Tools:
+  list publications, list files, read file, full-text search, get release info.
+  No model, no embeddings, no state. ~zero startup.
+
+- **snowflake-rag** — semantic search over precomputed embeddings. Tools:
+  search_docs, search_code, get_chunk, get_bundle_info. Loads a portable
+  bundle once at startup (~1 GB); answers queries in ~1-2 ms (MLX on Apple
+  Silicon) or ~50-200 ms (ONNX+CPU).
+
+The RAG bundle is **built once** by the maintainer locally, then distributed
+as a single download via `atlas-download`. End users never embed, never chunk,
+never run a vector database, never pull a model.
+
+---
+
+## Table of contents
+
+1. [Why two servers and not one?](#1-why-two-servers-and-not-one)
+2. [Tech stack & rationale](#2-tech-stack--rationale)
+3. [Project structure](#3-project-structure)
+4. [For users: install and use](#4-for-users-install-and-use)
+5. [For maintainers: building and releasing](#5-for-maintainers-building-and-releasing)
+6. [Operating](#6-operating)
+7. [Roadmap](#7-roadmap)
+8. [Platform support & caveats](#8-platform-support--caveats)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Development](#10-development)
+11. [Validate RAG quality](#11-validate-rag-quality)
+12. [License](#12-license)
+
+---
+
+## 1. Why two servers and not one?
+
+A single RAG pipeline forces every consumer into a fixed retrieval
+strategy and a fixed embedding model. Splitting into a filesystem
+server and a RAG server buys:
+
+- **Different strengths.** The filesystem server is unbeatable for
+  "list the publications," "read this specific file," and "grep for
+  the exact symbol." The RAG server is unbeatable for "find docs
+  that talk about X" where the wording is fuzzy.
+- **Different trust levels.** The filesystem server returns the
+  verbatim markdown — no embedding can ever lie about it. The RAG
+  server returns ranked candidates; the model should still verify
+  with the filesystem server for anything load-bearing.
+- **Different cost profiles.** The filesystem server is ~zero startup.
+  The RAG server loads ~1 GB of vectors at startup but answers in
+  ~100 ms. A smart client uses both: RAG to discover, FS to verify.
+- **Different model fits.** A weak local model struggles with
+  multi-hop FS navigation but does fine with RAG top-k. A
+  strong external model can do either, and benefits from using both.
+
+---
+
+## 2. Tech stack & rationale
+
+| Component | Choice | Why |
+|-----------|--------|-----|
+| **MCP transport** | Official Python `mcp` SDK (stdio) | The standard. Works in Zed, opencode, Claude Desktop, Continue, any MCP client. |
+| **Filesystem search** | `ripgrep` subprocess | 10-100× faster than Python `re` over thousands of files. Single binary, well-maintained. |
+| **Embedding model** | `Xenova/bge-base-en-v1.5` (ONNX) / `BAAI/bge-base-en-v1.5` (PyTorch) | 110M params, 768-dim, MTEB top-30. Pre-exported ONNX graph ships from HF. |
+| **Inference runtime** | Layered: MLX → ONNX+CUDA → ONNX+CPU | Apple Silicon gets MLX (1-2 ms/query). Linux + NVIDIA gets ONNX+CUDA. Everything else gets ONNX+CPU. |
+| **Vector store** | `numpy` `.npy` arrays | At 100k × 768 dims, a single matrix multiply is ~10-20 ms. FAISS is overkill. |
+| **Chunk metadata** | `pyarrow` Parquet (snappy compressed) | Columnar, compressed, zero-copy reads. No pandas import overhead. |
+| **Embedding dtype** | `float16` vectors, `float32` norms | Cosine similarity is rank-preserving under half precision. Halves bundle size. |
+| **Tokenizer** | `transformers` `AutoTokenizer` | First-class support for BGE fast tokenizer. |
+| **Docs source** | `https://docs.snowflake.com/llms.txt` | Official LLM-friendly markdown publication. Web-crawl mirrored. |
+| **Chunking** | H2-boundary sections per markdown file | Respects the docs' deliberate structure. One H2 = one chunk. |
+| **Distribution** | GitHub Releases (per-tag) | Simple, free, CLI-friendly API. End users download with one command. |
+| **Doc crawler** | aiohttp + optional Camoufox stealth | Async, rate-limited, with jitter and rotating User-Agent pool. See [crawler docs](#9-troubleshooting). |
+| **Re-ranking** (opt-in) | `cross-encoder/ms-marco-MiniLM-L6-v2` (ONNX) | 22.7M params, 74.3 NDCG@10. Adds ~5 ms per query on MLX. |
+| **Package management** | `uv` | Fast resolver, lockfile, virtualenv, build system. |
+
+---
+
+## 3. Project structure
+
+```
+snowflake-atlas/
+├── README.md                                 This file
+├── pyproject.toml                            uv-managed deps, console-script entry points
+├── .gitignore
+│
+├── atlas/                                    Core Atlas package (importable as `atlas`)
+│   ├── __init__.py                           Version + package docstring
+│   ├── chunk.py                              H2-boundary markdown chunker
+│   ├── log.py                                Structured logging via structlog
+│   ├── fs_server.py                          Filesystem MCP server (ripgrep-backed)
+│   ├── rag_server.py                         RAG MCP server (auto-selects backend)
+│   ├── make_bundle.py                        Bundle builder (chunk → embed → write)
+│   ├── download.py                           Bundle downloader + SHA256 verification
+│   ├── backup.py                             Snapshot current bundle
+│   ├── restore.py                            Roll back to a previous snapshot
+│   ├── doctor.py                             Installation diagnosis + backend probe
+│   ├── smoke_test.py                         E2E validation (build + search)
+│   ├── evaluate.py                           RAG quality (Precision@10, MRR)
+│   ├── rerank.py                             Cross-encoder re-ranker (MiniLM-L6-v2 ONNX)
+│   ├── embed/                                Embedding backends (factory pattern)
+│   │   ├── __init__.py
+│   │   ├── base.py                           ABC + factory + resolve_backend
+│   │   ├── onnx.py                           OnnxEmbedder (portable, CPU/CUDA)
+│   │   └── mlx.py                            MlxEmbedder (Apple Silicon)
+│   └── sources/                              Source adapters for markdown input
+│       ├── __init__.py
+│       ├── base.py                           MarkdownSource ABC
+│       ├── git.py                            Git repo source
+│       ├── web_crawl.py                      Web crawl mirror source
+│       └── local.py                          Local directory source
+│
+├── snowflake_docs_nav/                       Snowflake-specific doc crawler
+│   ├── __init__.py
+│   └── crawler.py                            Async llms.txt crawler with stealth
+│
+├── scripts/
+│   └── publish-bundle.sh                     Local build + gh release create
+│
+├── tests/
+│   ├── __init__.py
+│   ├── test_chunk.py                         Chunker tests
+│   ├── test_embed.py                         Embedding backend tests
+│   ├── test_fs_server.py                     FS MCP server tests
+│   ├── test_rag_server.py                    RAG MCP server tests
+│   ├── test_sources.py                       Source adapter tests
+│   ├── test_backup_restore.py                Backup/restore tests
+│   ├── test_doctor.py                        Doctor diagnosis tests
+│   └── test_download.py                      Bundle download tests
+│
+├── data/                                     Runtime data (gitignored, created at runtime)
+```
+
+---
+
+## 4. For users: install and use
+
+### 4.1 Prerequisites
+
+- **Python 3.11+** (3.12 or 3.13 recommended).
+- **[`uv`](https://docs.astral.sh/uv/)** for Python environment management.
+- **[`ripgrep`](https://github.com/BurntSushi/ripgrep)** (`brew install ripgrep` or `apt install ripgrep`).
+- ~1.5 GB of free disk for the bundle.
+
+> **Platforms.** Atlas runs on three classes of host, each picking a
+> different embedding backend by default:
+>
+> - **Apple Silicon (M1/M2/M3/M4).** Default backend is MLX, which talks
+>   to the Apple Neural Engine directly. ~1-2 ms per query. Install with
+>   `uv sync --extra mlx`.
+> - **Linux x86_64 with an NVIDIA GPU.** Default backend is ONNX Runtime + CUDA.
+>   ~1-2 ms per query. Install with `uv sync --extra gpu`.
+> - **Anything else** falls back to ONNX+CPU. ~50-200 ms per query.
+
+### 4.2 Install
+
+```bash
+git clone <this-repo-url> snowflake-atlas
+cd snowflake-atlas
+uv sync
+```
+
+**Optional extras** (pick what your machine can use):
+
+```bash
+# Apple Silicon: MLX embedder
+uv sync --extra mlx
+
+# Linux with NVIDIA GPU: ONNX Runtime + CUDA
+uv sync --extra gpu
+
+# Both
+uv sync --extra mlx --extra gpu
+```
+
+> **Re-applying extras on subsequent `uv sync`.** `uv sync` synchronizes
+> the venv to match the lockfile plus whichever extras you specify on the
+> command line. If you later run plain `uv sync`, the MLX/GPU packages
+> will be silently removed. Keep them by re-running with the same flags:
+> `uv sync --extra mlx`. After a sync, `atlas-doctor` will tell you
+> immediately if a previously-installed backend is now MISS.
+
+### 4.3 Download the pre-built bundle
+
+```bash
+uv run atlas-download \
+  --repo <owner>/snowflake-atlas \
+  --output ./data/snowflake-rag-bundle
+```
+
+This downloads, verifies SHA256, and extracts the bundle. If a previous
+bundle exists, it's snapshotted into `./data/snowflake-rag-bundle/.backups/`
+first (most recent 5 kept by default).
+
+Pin to a specific release:
+
+```bash
+uv run atlas-download \
+  --repo <owner>/snowflake-atlas \
+  --tag v2026.07 \
+  --output ./data/snowflake-rag-bundle
+```
+
+### 4.4 Get the docs mirror (for filesystem server)
+
+Download the pre-crawled mirror from GitHub Releases:
+
+```bash
+uv run atlas-download \
+  --repo <owner>/snowflake-docs-mirror \
+  --output ./data/snowflake-docs
+```
+
+Or crawl it yourself (see [§5.1](#51-crawl-snowflake-documentation)).
+
+### 4.5 Configure your IDE
+
+Both servers speak MCP over stdio, so any client that supports
+[the standard](https://modelcontextprotocol.io) works: Zed, opencode,
+Claude Desktop, Continue, and others.
+
+#### Zed (`~/.config/zed/settings.json`)
+
+```json
+"context_servers": {
+  "snowflake-fs": {
+    "command": "uv",
+    "args": [
+      "run", "--directory", "/absolute/path/to/snowflake-atlas",
+      "snowflake-fs", "--source-type", "web-crawl", "--mirror-path", "/absolute/path/to/data/snowflake-docs"
+    ],
+    "timeout": 60
+  },
+  "snowflake-rag": {
+    "command": "uv",
+    "args": [
+      "run", "--directory", "/absolute/path/to/snowflake-atlas",
+      "snowflake-rag", "--bundle", "/absolute/path/to/data/snowflake-rag-bundle", "--prefer", "auto"
+    ],
+    "timeout": 120
+  }
+}
+```
+
+#### opencode (`~/.config/opencode/profiles/default.json`)
+
+```json
+"mcpServers": {
+  "snowflake-fs": {
+    "command": "uv",
+    "args": [
+      "run", "--directory", "/absolute/path/to/snowflake-atlas",
+      "snowflake-fs", "--source-type", "web-crawl", "--mirror-path", "/absolute/path/to/data/snowflake-docs"
+    ]
+  },
+  "snowflake-rag": {
+    "command": "uv",
+    "args": [
+      "run", "--directory", "/absolute/path/to/snowflake-atlas",
+      "snowflake-rag", "--bundle", "/absolute/path/to/data/snowflake-rag-bundle", "--prefer", "auto"
+    ]
+  }
+}
+```
+
+#### Claude Desktop (`~/.config/Claude/claude_desktop_config.json`)
+
+```json
+{
+  "mcpServers": {
+    "snowflake-fs": {
+      "command": "uv",
+      "args": [
+        "run", "--directory", "/absolute/path/to/snowflake-atlas",
+        "snowflake-fs", "--source-type", "web-crawl", "--mirror-path", "/absolute/path/to/data/snowflake-docs"
+      ]
+    },
+    "snowflake-rag": {
+      "command": "uv",
+      "args": [
+        "run", "--directory", "/absolute/path/to/snowflake-atlas",
+        "snowflake-rag", "--bundle", "/absolute/path/to/data/snowflake-rag-bundle", "--prefer", "auto"
+      ]
+    }
+  }
+}
+```
+
+### 4.6 Quick CLI sanity check
+
+```bash
+# Confirm both servers start
+uv run snowflake-fs --help
+uv run snowflake-rag --help
+
+# Run diagnosis
+uv run atlas-doctor
+
+# Run smoke test
+uv run atlas-smoke \
+  --bundle ./data/snowflake-rag-bundle \
+  --source-type web-crawl \
+  --mirror-path ./data/snowflake-docs
+```
+
+---
+
+## 5. For maintainers: building and releasing
+
+### 5.0 First-time build walkthrough
+
+A guided path for building the bundle on your own machine, from a
+fresh `uv sync` to a working bundle.
+
+**Preflight.** Confirm the embedding backend you expect is available:
+
+```bash
+uv sync --extra mlx        # or --extra gpu on Linux + NVIDIA
+uv run atlas-doctor        # should report: MLX OK, selected: mlx
+```
+
+**Convert MLX weights (2 minutes, one-time).** The MLX backend needs
+pre-converted weight files. This uses PyTorch temporarily to read the
+Hugging Face checkpoint and write 197 ``.npy`` files to the MLX cache.
+
+```bash
+uv pip install torch
+uv run python tools/convert_bge_to_mlx.py
+uv pip uninstall torch --yes
+```
+
+The tokenizer (``transformers.AutoTokenizer``) works without PyTorch —
+the warning about "PyTorch was not found" is harmless. PyTorch is only
+needed for this one-time weight conversion.
+
+**Smoke crawl (2 minutes).** Test the crawler with a single section:
+
+```bash
+# Use `uv run` to invoke the command within the project's virtual environment
+uv run python -m snowflake_docs_nav.crawler \
+  --output ./data/snowflake-docs \
+  --sections cortex-ai \
+  --max-pages 20 \
+  --stealth
+```
+
+**Smoke build (2 minutes).** Test the pipeline with a tiny bundle:
+
+```bash
+uv run atlas-build \
+  --source-type web-crawl \
+  --mirror-path ./data/snowflake-docs \
+  --output /tmp/atlas-smoke \
+  --limit 100 \
+  --prefer apple
+```
+
+**Sanity-check the smoke bundle:**
+
+```bash
+.venv/bin/python -c "
+from atlas.rag_server import Bundle
+b = Bundle('/tmp/atlas-smoke', prefer='apple')
+hits = b.search('Snowflake Cortex AI', top_k=3)
+for h in hits:
+    print(f'  {h[\"score\"]:.3f}  {h[\"file\"]} :: {h[\"heading\"]}')
+"
+```
+
+Using `.venv/bin/python` directly avoids the ~300 ms `uv run` overhead.
+For pure JSON inspection of the manifest:
+
+```bash
+jq . /tmp/atlas-smoke/manifest.json | head -20
+```
+
+**Full crawl (~30 minutes):**
+
+```bash
+uv run python -m snowflake_docs_nav.crawler \
+  --output ./data/snowflake-docs \
+  --stealth
+```
+
+**Full build (2-4 hours depending on hardware):**
+
+```bash
+uv run atlas-build \
+  --source-type web-crawl \
+  --mirror-path ./data/snowflake-docs \
+  --output ./data/snowflake-rag-bundle \
+  --prefer auto
+```
+
+### 5.1 Crawl Snowflake documentation
+
+The crawler fetches every `.md` page listed in the `llms.txt` hierarchy
+across all ~30 documentation sections.
+
+```bash
+# Full crawl (~6,800 pages, ~30 min)
+uv run python -m snowflake_docs_nav.crawler --output ./data/snowflake-docs
+
+# Stealth mode (rotating UAs, jitter, realistic headers)
+uv run python -m snowflake_docs_nav.crawler --output ./data/snowflake-docs --stealth
+
+# Test with subset
+uv run python -m snowflake_docs_nav.crawler --output ./data/snowflake-docs --sections cortex-ai,sql-functions --max-pages 50
+
+# Camoufox browser engine (slowest but most stealthy)
+uv run python -m snowflake_docs_nav.crawler --output ./data/snowflake-docs --engine camoufox
+```
+
+The crawler saves files to `markdown/<publication>/<path>.md` and writes
+a `crawl_meta.json` with source URL, timestamp, and crawler SHA.
+
+Useful flags:
+- `--stealth` — enables rotating User-Agent pool, jittered delays, and consistent browser headers
+- `--engine camoufox` — uses Camoufox (stealth Firefox) instead of aiohttp
+- `--sections cortex-ai,sql-functions` — crawl only specific sections
+- `--max-pages 100` — limit total pages fetched
+- `--delay-min 0.5 --delay-max 2.0` — control jitter range (default: 0.3-1.5s)
+
+### 5.1.5 MLX weight conversion (Apple Silicon)
+
+The MLX backend requires pre-converted weights from the PyTorch
+checkpoint. This is a **one-time step per machine** — once the
+``.npy`` files are in the cache, every build and query reuses them.
+
+```bash
+# Install torch temporarily for the conversion
+uv pip install torch
+
+# Run the conversion (writes to ~/.cache/atlas/models/bge-base-en-v1.5-mlx/)
+uv run python tools/convert_bge_to_mlx.py
+
+# Uninstall torch — not needed at runtime
+uv pip uninstall torch --yes
+```
+
+The conversion reads ``BAAI/bge-base-en-v1.5`` (the PyTorch model)
+and writes 197 ``.npy`` weight files. The MLX embedder then loads
+them at ``~/.cache/atlas/models/bge-base-en-v1.5-mlx/`` and never
+touches PyTorch again.
+
+After conversion, ``atlas-doctor`` reports ``MLX OK, selected: mlx``
+and ``atlas-build --prefer apple`` will use the ANE/GPU accelerator.
+
+> **Note:** If the MLX cache is empty, ``atlas-build --prefer apple``
+> falls back gracefully to ONNX+CPU with a reminder to run the
+> conversion script. ONNX+CPU is ~3-5x slower but works without any
+> setup.
+
+### 5.2 Build RAG bundle
+
+```bash
+# Full build
+uv run atlas-build \
+    --source-type web-crawl \
+    --mirror-path ./data/snowflake-docs \
+    --output ./data/snowflake-rag-bundle \
+    --prefer auto
+
+# Test build (skip embeddings, limit files)
+uv run atlas-build \
+    --source-type web-crawl \
+    --mirror-path ./data/snowflake-docs \
+    --output ./data/test-bundle \
+    --limit 100 \
+    --skip-embed
+```
+
+The build writes a `manifest.json` with the source SHA, chunk count,
+model ID, and SHA256 of each artifact.
+
+### 5.3 Validate
+
+```bash
+# Run smoke tests
+uv run atlas-smoke \
+    --bundle ./data/snowflake-rag-bundle \
+    --source-type web-crawl \
+    --mirror-path ./data/snowflake-docs \
+    --verbose
+
+# Diagnose installation
+uv run atlas-doctor --bundle ./data/snowflake-rag-bundle
+```
+
+### 5.4 Publishing a release
+
+The bundle is built locally — embedding ~100k chunks on a CI runner is
+impractical. On Apple Silicon with MLX the build takes ~30 min; on a
+CPU-only machine it takes longer but still finishes.
+
+```bash
+# Prerequisites: gh CLI installed and authenticated
+#   brew install gh && gh auth login
+
+# Publish the existing bundle (fast, no rebuild)
+./scripts/publish-bundle.sh <owner>/snowflake-atlas
+
+# Or rebuild first (takes ~30 min on Apple Silicon)
+./scripts/publish-bundle.sh --rebuild <owner>/snowflake-atlas
+```
+
+This tars the bundle, creates a GitHub Release tagged `vYYYY.MM`, and
+uploads it. Users can then install it with `atlas-download`.
+
+The script lives at `scripts/publish-bundle.sh` — read it to see exactly
+what it does before running.
+
+### 5.5 Smoke-test the bundle
+
+After building or downloading a bundle, validate it end-to-end:
+
+```bash
+uv run atlas-smoke \
+  --bundle ./data/snowflake-rag-bundle \
+  --source-type web-crawl \
+  --mirror-path ./data/snowflake-docs
+```
+
+The smoke test confirms the bundle loads, embeddings are queryable, and
+the filesystem server can serve files from the mirror.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Source["📄 Docs Source"]
+        URL[("docs.snowflake.com<br/>llms.txt hierarchy")]
+    end
+
+    subgraph Crawl["🕷️ Crawler"]
+        CRAWLER["snowflake-crawl<br/>aiohttp / Camoufox"]
+        JITTER["jitter + rotating UAs<br/>+ stealth headers"]
+    end
+
+    subgraph Mirror["💾 Local Mirror"]
+        MD["markdown/<br/>publication/*.md"]
+        META["crawl_meta.json"]
+    end
+
+    subgraph Build["🔨 Bundle Builder"]
+        CHUNK["atlas-build<br/>chunk → embed → write"]
+        MODEL[("bge-base-en-v1.5<br/>embedding model")]
+    end
+
+    subgraph Bundle["📦 RAG Bundle"]
+        CHUNKS["chunks.parquet"]
+        VECTORS["embeddings.f16.npy"]
+        NORMS["norms.f32.npy"]
+        MANIFEST["manifest.json"]
+    end
+
+    subgraph Publish["🚀 Distribution"]
+        RELEASE["GitHub Release<br/>tar.zst"]
+        DOWNLOAD["atlas-download<br/>SHA256 verify"]
+    end
+
+    subgraph MCP["🧠 MCP Servers"]
+        FS["snowflake-fs<br/>ripgrep-backed"]
+        RAG["snowflake-rag<br/>vector search"]
+    end
+
+    subgraph Clients["💻 MCP Clients"]
+        ZED["Zed"]
+        OPENCODE["opencode"]
+        CLAUDE["Claude Desktop"]
+        CONTINUE["Continue"]
+    end
+
+    URL -->|"llms.txt → section llms.txt → .md"| CRAWLER
+    CRAWLER --> JITTER
+    JITTER -->|"stealth fetch"| URL
+    CRAWLER -->|"write"| MD
+    CRAWLER --> META
+
+    MD -->|"read"| CHUNK
+    MODEL -->|"embed"| CHUNK
+    CHUNK -->|"write"| CHUNKS
+    CHUNK --> VECTORS
+    CHUNK --> NORMS
+    CHUNK --> MANIFEST
+
+    Bundle -->|"tar + gh release"| RELEASE
+    RELEASE -->|"download + verify"| DOWNLOAD
+    DOWNLOAD -->|"extract to"| Bundle
+
+    MD -->|"read live"| FS
+    Bundle -->|"load at startup"| RAG
+
+    Clients -->|"MCP stdio"| FS
+    Clients -->|"MCP stdio"| RAG
+```
+
+---
+
+## 6. Operating
+
+### 6.1 Update to the latest bundle
+
+```bash
+uv run atlas-download --repo <owner>/snowflake-atlas --output ./data/snowflake-rag-bundle
+```
+
+The current bundle is auto-snapshotted before being replaced. If the new
+bundle is broken, the IDE still works against the old directory while
+you sort it out.
+
+### 6.2 List and roll back
+
+```bash
+uv run atlas-restore --bundle ./data/snowflake-rag-bundle --list
+
+uv run atlas-restore --bundle ./data/snowflake-rag-bundle  # latest
+uv run atlas-restore --bundle ./data/snowflake-rag-bundle --from snapshot-20260701T120000Z.tar.gz
+```
+
+`atlas-restore` snapshots the current bundle as a safety net before
+swapping, so you can always go back one more step.
+
+### 6.3 Manual snapshot
+
+```bash
+uv run atlas-backup --bundle ./data/snowflake-rag-bundle --keep 5
+```
+
+### 6.6 Diagnose with `atlas-doctor`
+
+```bash
+uv run atlas-doctor
+uv run atlas-doctor --bundle ./data/snowflake-rag-bundle
+uv run atlas-doctor --refresh
+uv run atlas-doctor --json
+```
+
+Output (short form):
+
+```
+Platform       : Darwin 24.5.0 (arm64)
+Python         : 3.13.5
+ONNX Runtime   : 1.26.0  providers: ['CoreMLExecutionProvider', 'CPUExecutionProvider']
+
+Backend probe:
+  ONNX+CPU       OK  always available
+  Apple MLX      OK   weights cached
+  NVIDIA CUDA    MISS nvidia-smi not on PATH
+
+Selected       : mlx
+                Apple Silicon detected and MLX is importable
+
+Bundle         : /Users/me/data/snowflake-rag-bundle
+                manifest=OK chunks=OK embeddings=OK
+                52 chunks, model=Xenova/bge-base-en-v1.5 (SHA ok)
+```
+
+`atlas-doctor` is non-destructive and never blocks startup. Run it first
+when something is wrong.
+
+---
+
+## Commands Reference
+
+| Command | Description |
+|---------|-------------|
+| `snowflake-fs` | Filesystem MCP server (ripgrep-based) |
+| `snowflake-rag` | RAG MCP server (vector search) |
+| `atlas-build` | Build RAG bundle from source |
+| `atlas-download` | Download bundle from GitHub Releases |
+| `atlas-backup` | Snapshot current bundle |
+| `atlas-restore` | Roll back to snapshot |
+| `atlas-smoke` | Run E2E smoke tests |
+| `atlas-doctor` | Diagnose installation + backend |
+| `atlas-evaluate` | Evaluate RAG quality (P@10, MRR) |
+| `snowflake-crawl` | Crawl Snowflake docs to local mirror |
+
+---
+
+## Backend Selection
+
+| Platform | Default Backend | Override |
+|----------|----------------|----------|
+| Apple Silicon (M1/M2/M3/M4) | MLX (~1-2 ms/query) | `--prefer cpu` |
+| Linux + NVIDIA GPU | ONNX+CUDA (~1-2 ms/query) | `--prefer cpu` |
+| Everything else | ONNX+CPU (~50-200 ms/query) | N/A |
+
+The backend is resolved at **run time** (not build time). The same bundle
+works everywhere. Use `atlas-doctor` to see which backend will be selected.
+
+Override examples:
+
+```bash
+# Always MLX, even on a machine that would default to CUDA
+uv run snowflake-rag --prefer apple
+
+# Force the portable floor (useful for debugging)
+ATLAS_EMBED_BACKEND=cpu uv run snowflake-rag
+```
+
+---
+
+## Configuration
+
+Create `~/.config/atlas.toml` to set default backend:
+
+```toml
+[backend]
+prefer = "auto"  # or "apple", "nvidia", "cpu"
+```
+
+Or use environment variable:
+
+```bash
+export ATLAS_EMBED_BACKEND=apple
+```
+
+---
+
+## 7. Roadmap
+
+### Cross-encoder re-ranker (`atlas/rerank.py`)
+
+A cross-encoder re-ranker that re-scores the top-100 candidates from
+semantic search using a joint query-passage model. Enabled with
+`--rerank` on the RAG server. Uses the MiniLM-L6-v2 cross-encoder
+model exported to ONNX (~45 MB, ~5 ms per query on MLX).
+
+### Reasoning agent (`atlas/agent.py`, planned)
+
+What it should eventually be:
+
+- A thin local agent that wraps the two MCP servers for command-line
+  use (`atlas-agent "find docs about Snowflake Cortex AI functions"`)
+  for users who don't have an IDE with MCP support.
+- Pre-built tool-use prompt templates tuned for Snowflake tasks
+  (SQL reference lookup, Cortex AI configuration, migration planning).
+- A planner that fans a question out to `snowflake-fs` + `snowflake-rag` in
+  parallel and merges the results.
+
+### Fine-tuning pipeline (`atlas/training.py`, planned)
+
+- Dataset curation from the same RAG bundle used for retrieval.
+- QLoRA adapters for local models, with evaluation against MCP tool-calling contracts.
+
+---
+
+## 8. Platform support & caveats
+
+### Supported
+
+- **Apple Silicon (M1/M2/M3/M4), all macOS versions with current
+  security updates.** MLX is the default backend on this hardware
+  (`uv sync --extra mlx` to install).
+- **Linux x86_64 + CPU.** The portable ONNX+CPU floor works everywhere.
+- **Linux x86_64 + NVIDIA GPU.** ONNX+CUDA via `uv sync --extra gpu`.
+
+### Not supported
+
+- **Intel Macs.** Falls back to ONNX+CPU. No MLX acceleration.
+- **Windows.** `mcp` and `onnxruntime` work on Windows, but `rg` and
+  `tar` paths are untested.
+
+### Known limitations
+
+- The embedder's `max_seq_length` is 512 tokens. Chunks larger than
+  that are silently truncated. The H2 chunker rarely produces such
+  chunks, but the `chunk._hard_split` fallback handles them.
+- Cosine scores are not calibrated. A score of 0.7 is only meaningful
+  relative to other scores from the same query. Use `min_score` loosely.
+- The bundle targets a single snapshot of Snowflake docs. Re-build
+  periodically to stay current.
+
+---
+
+## 9. Troubleshooting
+
+### `No 'markdown/' directory at ...`
+
+The filesystem server was started with `--mirror-path` pointing at
+the wrong place. The expected layout is
+`<mirror>/markdown/<publication>/*.md`. If you haven't crawled yet:
+
+```bash
+uv run python -m snowflake_docs_nav.crawler --output ./data/snowflake-docs
+```
+
+### `Bundle manifest missing`
+
+Either `--bundle` points at the wrong directory, or the bundle wasn't
+extracted cleanly. Re-run `atlas-download` and let it overwrite.
+
+### `ripgrep (rg) not installed`
+
+```bash
+brew install ripgrep        # macOS
+apt install ripgrep         # Debian/Ubuntu
+```
+
+### `Context server requires timeout` in Zed/opencode
+
+The first RAG query after server startup pays a one-time warmup cost:
+~3-5 s for ONNX+CPU, ~1 s for MLX. Raise the MCP `timeout` to 120 or
+300 seconds to absorb the warmup.
+
+### `atlas-doctor` says MLX is MISS but I have an M-series
+
+You didn't install the optional MLX extra. Run:
+
+```bash
+uv sync --extra mlx
+```
+
+After that, `atlas-doctor` will find MLX and it becomes the default.
+
+### Search returns nothing useful
+
+1. Run `get_bundle_info` to confirm the bundle is loaded.
+2. Try `search_docs` with a broader query.
+3. Use `snowflake-fs` to grep for exact terms.
+4. Drop `min_score` to 0.0 to see all candidates.
+
+### Crawler gets rate-limited
+
+The crawler has two stealth layers:
+
+```bash
+# Basic stealth: rotating UAs + jitter
+uv run python -m snowflake_docs_nav.crawler --output ./data/snowflake-docs --stealth
+
+# Maximum stealth: Camoufox browser engine
+uv run python -m snowflake_docs_nav.crawler --output ./data/snowflake-docs --engine camoufox
+```
+
+If you're still getting rate-limited, increase the jitter range:
+
+```bash
+uv run python -m snowflake_docs_nav.crawler --output ./data/snowflake-docs --stealth --delay-min 1.0 --delay-max 3.0
+```
+
+### Console scripts not found after `uv sync`
+
+If `uv run snowflake-fs --help` returns "command not found," the package
+isn't installed in the venv. Run `uv sync` (no flags) to install the
+project itself, not just its dependencies.
+
+---
+
+## 10. Development
+
+### Useful shell recipes
+
+```bash
+# Pretty-print the bundle manifest (no `cat`, no `uv run` overhead)
+jq . data/snowflake-rag-bundle/manifest.json
+
+# If you don't have jq, fall back to stdlib
+.venv/bin/python -m json.tool data/snowflake-rag-bundle/manifest.json | head -20
+
+# Load a bundle in Python without going through `uv run`
+.venv/bin/python -c "
+from atlas.rag_server import Bundle
+b = Bundle('data/snowflake-rag-bundle', prefer='apple')
+for h in b.search('Snowflake tasks', top_k=3):
+    print(f'{h[\"score\"]:.3f}  {h[\"file\"]}')
+"
+```
+
+Install `jq` once (`brew install jq` on macOS, `apt install jq` on
+Linux) and the first command is the one you'll reach for every time.
+
+### Run unit tests
+
+```bash
+uv run pytest tests/ -v
+```
+
+Runs the full test suite (chunker, embedder, MCP servers, bundle build).
+
+### Run the smoke test
+
+```bash
+uv run atlas-smoke \
+  --bundle ./data/snowflake-rag-bundle \
+  --source-type web-crawl \
+  --mirror-path ./data/snowflake-docs
+```
+
+### Add a new tool
+
+1. Add a `Tool(...)` entry in `atlas/fs_server.py` or `atlas/rag_server.py`.
+2. Add a handler branch in `call_tool`.
+3. Keep the handler synchronous (it's already running in the async
+   event loop; `asyncio.to_thread` is fine for blocking I/O).
+
+### Change the embedder
+
+Edit `embed.DEFAULT_MODEL_ID` and `embed.EMBEDDING_DIM`. The bundle build
+and the runtime server read both. Changing embedding models invalidates
+all existing bundles.
+
+### Change the chunker
+
+Edit `atlas/chunk.py`. The schema is documented in the module docstring.
+Run `atlas-smoke` after changes.
+
+---
+
+## 11. Validate RAG quality
+
+To evaluate the quality of the RAG system beyond the basic smoke test,
+run the dedicated evaluation tool:
+
+```bash
+uv run atlas-evaluate --prefer apple --top-k 20
+```
+
+This measures **Precision@10** (fraction of top-10 results containing the
+query string) and **Mean Reciprocal Rank** (1/rank of first relevant result).
+
+The source is at `atlas/evaluate.py`.
+
+---
+
+## 12. License
+
+MIT License — see [LICENSE](LICENSE) file. The Snowflake documentation
+content is governed by the Snowflake legal terms.

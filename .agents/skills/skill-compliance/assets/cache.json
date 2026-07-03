@@ -1,0 +1,354 @@
+{
+  "structure": {
+    "passed": true,
+    "timestamp": "20260703-081644",
+    "ttl_s": 3600,
+    "details": [
+      {
+        "check_item": "skill-file-agent-handoff",
+        "passed": true,
+        "evidence": "agent-handoff/SKILL.md: found"
+      },
+      {
+        "check_item": "skill-file-atlas-creation",
+        "passed": true,
+        "evidence": "atlas-creation/SKILL.md: found"
+      },
+      {
+        "check_item": "skill-file-code-review",
+        "passed": true,
+        "evidence": "code-review/SKILL.md: found"
+      },
+      {
+        "check_item": "skill-file-debugging",
+        "passed": true,
+        "evidence": "debugging/SKILL.md: found"
+      },
+      {
+        "check_item": "skill-file-python-patterns",
+        "passed": true,
+        "evidence": "python-patterns/SKILL.md: found"
+      },
+      {
+        "check_item": "skill-file-python-testing",
+        "passed": true,
+        "evidence": "python-testing/SKILL.md: found"
+      },
+      {
+        "check_item": "skill-file-readme-writing",
+        "passed": true,
+        "evidence": "readme-writing/SKILL.md: found"
+      },
+      {
+        "check_item": "skill-file-skill-compliance",
+        "passed": true,
+        "evidence": "skill-compliance/SKILL.md: found"
+      },
+      {
+        "check_item": "skill-file-skill-writing",
+        "passed": true,
+        "evidence": "skill-writing/SKILL.md: found"
+      },
+      {
+        "check_item": "skill-file-snowflake-docs-nav",
+        "passed": true,
+        "evidence": "snowflake-docs-nav/SKILL.md: found"
+      },
+      {
+        "check_item": "skill-file-web-browsing",
+        "passed": true,
+        "evidence": "web-browsing/SKILL.md: found"
+      },
+      {
+        "check_item": "untracked-skills",
+        "passed": true,
+        "evidence": "All skill directories are listed in AGENTS.md catalog"
+      },
+      {
+        "check_item": "missing-skills",
+        "passed": true,
+        "evidence": "All cataloged skills have directories on disk"
+      }
+    ]
+  },
+  "invocation": {
+    "passed": true,
+    "timestamp": "20260703-081644",
+    "ttl_s": 3600,
+    "details": [
+      {
+        "check_item": "invocation-agent-handoff",
+        "passed": true,
+        "evidence": "agent-handoff: disable-model-invocation=false \u2192 catalog='model-invoked' \u2713 model-invoked"
+      },
+      {
+        "check_item": "invocation-atlas-creation",
+        "passed": true,
+        "evidence": "atlas-creation: disable-model-invocation=false \u2192 catalog='model-invoked' \u2713 model-invoked"
+      },
+      {
+        "check_item": "invocation-code-review",
+        "passed": true,
+        "evidence": "code-review: disable-model-invocation=false \u2192 catalog='model-invoked' \u2713 model-invoked"
+      },
+      {
+        "check_item": "invocation-debugging",
+        "passed": true,
+        "evidence": "debugging: disable-model-invocation=false \u2192 catalog='model-invoked' \u2713 model-invoked"
+      },
+      {
+        "check_item": "invocation-python-patterns",
+        "passed": true,
+        "evidence": "python-patterns: disable-model-invocation=false \u2192 catalog='model-invoked' \u2713 model-invoked"
+      },
+      {
+        "check_item": "invocation-python-testing",
+        "passed": true,
+        "evidence": "python-testing: disable-model-invocation=false \u2192 catalog='model-invoked' \u2713 model-invoked"
+      },
+      {
+        "check_item": "invocation-readme-writing",
+        "passed": true,
+        "evidence": "readme-writing: disable-model-invocation=false \u2192 catalog='model-invoked' \u2713 model-invoked"
+      },
+      {
+        "check_item": "invocation-skill-compliance",
+        "passed": true,
+        "evidence": "skill-compliance: disable-model-invocation=false \u2192 catalog='model-invoked' \u2713 model-invoked"
+      },
+      {
+        "check_item": "invocation-skill-writing",
+        "passed": true,
+        "evidence": "skill-writing: disable-model-invocation=true \u2192 catalog='**user-invoked**' \u2713 user-invoked"
+      },
+      {
+        "check_item": "invocation-snowflake-docs-nav",
+        "passed": true,
+        "evidence": "snowflake-docs-nav: disable-model-invocation=false \u2192 catalog='model-invoked' \u2713 model-invoked"
+      },
+      {
+        "check_item": "invocation-web-browsing",
+        "passed": true,
+        "evidence": "web-browsing: disable-model-invocation=false \u2192 catalog='model-invoked' \u2713 model-invoked"
+      }
+    ]
+  },
+  "description": {
+    "passed": true,
+    "timestamp": "20260703-080556",
+    "ttl_s": 3600,
+    "details": [
+      {
+        "check_item": "desc-agent-handoff",
+        "passed": true,
+        "evidence": "agent-handoff: description OK (1 line, 1 unique trigger(s))"
+      },
+      {
+        "check_item": "desc-atlas-creation",
+        "passed": true,
+        "evidence": "atlas-creation: description OK (1 line, 4 unique trigger(s))"
+      },
+      {
+        "check_item": "desc-code-review",
+        "passed": true,
+        "evidence": "code-review: description OK (1 line, 1 unique trigger(s))"
+      },
+      {
+        "check_item": "desc-debugging",
+        "passed": true,
+        "evidence": "debugging: description OK (1 line, 1 unique trigger(s))"
+      },
+      {
+        "check_item": "desc-python-patterns",
+        "passed": true,
+        "evidence": "python-patterns: description OK (1 line, 1 unique trigger(s))"
+      },
+      {
+        "check_item": "desc-python-testing",
+        "passed": true,
+        "evidence": "python-testing: description OK (1 line, 6 unique trigger(s))"
+      },
+      {
+        "check_item": "desc-readme-writing",
+        "passed": true,
+        "evidence": "readme-writing: description OK (1 line, 2 unique trigger(s))"
+      },
+      {
+        "check_item": "desc-skill-compliance",
+        "passed": true,
+        "evidence": "skill-compliance: description OK (1 line, 5 unique trigger(s))"
+      },
+      {
+        "check_item": "desc-skill-writing",
+        "passed": true,
+        "evidence": "skill-writing: user-invoked \u2014 description OK (1 line)"
+      },
+      {
+        "check_item": "desc-snowflake-docs-nav",
+        "passed": true,
+        "evidence": "snowflake-docs-nav: description OK (1 line, 2 unique trigger(s))"
+      },
+      {
+        "check_item": "desc-web-browsing",
+        "passed": true,
+        "evidence": "web-browsing: description OK (1 line, 2 unique trigger(s))"
+      }
+    ]
+  },
+  "handoff-compliance": {
+    "passed": true,
+    "timestamp": "20260703-080556",
+    "ttl_s": 300,
+    "details": [
+      {
+        "check_item": "handoffs-dir-exists",
+        "passed": true,
+        "evidence": ".handoffs/ directory: found at /Users/sagarshirwalkar/Documents/python_projects/snowflake-atlas/.handoffs"
+      },
+      {
+        "check_item": "handoff-skill-exists",
+        "passed": true,
+        "evidence": "agent-handoff/SKILL.md: found at .agents/skills/agent-handoff/SKILL.md"
+      },
+      {
+        "check_item": "handoff-storage",
+        "passed": true,
+        "evidence": "agent-handoff/SKILL.md: references .handoffs/ with timestamp pattern"
+      },
+      {
+        "check_item": "agents-handoff-section",
+        "passed": true,
+        "evidence": "AGENTS.md session rituals / handoff section: found pattern /## (Session Rituals|Handoff Protocol)/"
+      },
+      {
+        "check_item": "agents-compaction",
+        "passed": true,
+        "evidence": "AGENTS.md compaction mention: found pattern /compaction/"
+      }
+    ]
+  },
+  "leading-words": {
+    "passed": true,
+    "timestamp": "20260703-080556",
+    "ttl_s": 7200,
+    "details": [
+      {
+        "check_item": "leading-agent-handoff",
+        "passed": true,
+        "evidence": "agent-handoff: leading words: Handoff, Compact, Milestone"
+      },
+      {
+        "check_item": "leading-atlas-creation",
+        "passed": true,
+        "evidence": "atlas-creation: leading words: dual-server, bundle, pinned, backend, H2-chunk, doctor, source-adapter"
+      },
+      {
+        "check_item": "leading-code-review",
+        "passed": true,
+        "evidence": "code-review: leading words: Triage, Gate"
+      },
+      {
+        "check_item": "leading-debugging",
+        "passed": true,
+        "evidence": "debugging: leading words: Probe, Bisect, Monomorph, Rubber duck"
+      },
+      {
+        "check_item": "leading-python-patterns",
+        "passed": true,
+        "evidence": "python-patterns: leading words: Idiom, Comprehension, EAFP, Context manager"
+      },
+      {
+        "check_item": "leading-python-testing",
+        "passed": true,
+        "evidence": "python-testing: leading words: red-green-refactor, fixture, parametrize, mock"
+      },
+      {
+        "check_item": "leading-readme-writing",
+        "passed": true,
+        "evidence": "readme-writing: has leading-words section, 6 bold-defined term(s)"
+      },
+      {
+        "check_item": "leading-skill-compliance",
+        "passed": true,
+        "evidence": "skill-compliance: leading words: Audit, Plugin, Staleness"
+      },
+      {
+        "check_item": "leading-skill-writing",
+        "passed": true,
+        "evidence": "skill-writing: has leading-words section, 17 bold-defined term(s)"
+      },
+      {
+        "check_item": "leading-snowflake-docs-nav",
+        "passed": true,
+        "evidence": "snowflake-docs-nav: 1 bold-defined term(s) found"
+      },
+      {
+        "check_item": "leading-web-browsing",
+        "passed": true,
+        "evidence": "web-browsing: leading words: Scout, Sift, Corroborate"
+      }
+    ]
+  },
+  "completion-criteria": {
+    "passed": true,
+    "timestamp": "20260703-080538",
+    "ttl_s": 3600,
+    "details": [
+      {
+        "check_item": "criteria-agent-handoff",
+        "passed": true,
+        "evidence": "SKILL.md: no numbered phases/steps found (reference-only skill \u2014 no criteria needed)"
+      },
+      {
+        "check_item": "criteria-atlas-creation",
+        "passed": true,
+        "evidence": "SKILL.md: no numbered phases/steps found (reference-only skill \u2014 no criteria needed)"
+      },
+      {
+        "check_item": "criteria-code-review",
+        "passed": true,
+        "evidence": "SKILL.md: 4 step(s) found, has completion criteria (text)"
+      },
+      {
+        "check_item": "criteria-debugging",
+        "passed": true,
+        "evidence": "SKILL.md: 5 step(s) found, has completion criteria (text)"
+      },
+      {
+        "check_item": "criteria-python-patterns",
+        "passed": true,
+        "evidence": "SKILL.md: no numbered phases/steps found (reference-only skill \u2014 no criteria needed)"
+      },
+      {
+        "check_item": "criteria-python-testing",
+        "passed": true,
+        "evidence": "SKILL.md: no numbered phases/steps found (reference-only skill \u2014 no criteria needed)"
+      },
+      {
+        "check_item": "criteria-readme-writing",
+        "passed": true,
+        "evidence": "SKILL.md: 4 step(s) found, has completion criteria (text)"
+      },
+      {
+        "check_item": "criteria-skill-compliance",
+        "passed": true,
+        "evidence": "SKILL.md: no numbered phases/steps found (reference-only skill \u2014 no criteria needed)"
+      },
+      {
+        "check_item": "criteria-skill-writing",
+        "passed": true,
+        "evidence": "SKILL.md: no numbered phases/steps found (reference-only skill \u2014 no criteria needed)"
+      },
+      {
+        "check_item": "criteria-snowflake-docs-nav",
+        "passed": true,
+        "evidence": "SKILL.md: no numbered phases/steps found (reference-only skill \u2014 no criteria needed)"
+      },
+      {
+        "check_item": "criteria-web-browsing",
+        "passed": true,
+        "evidence": "SKILL.md: 5 step(s) found, has completion criteria (text)"
+      }
+    ]
+  }
+}

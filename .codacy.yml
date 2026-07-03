@@ -1,0 +1,18 @@
+---
+engines:
+  # ruff handles style, imports, bugbears, and complexity — Pylint is redundant.
+  pylint:
+    enabled: false
+  Pylintpython3:
+    enabled: false
+
+  # Security warnings at Medium+ severity; Low is too noisy for test/script code.
+  bandit:
+    enabled: true
+    minimum_severity: MEDIUM
+
+  # Low-volume lint — keep as-is.
+  remark-lint:
+    enabled: true
+  shellcheck:
+    enabled: true

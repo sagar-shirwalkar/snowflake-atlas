@@ -80,6 +80,15 @@ select = [
 ]
 ignore = [
     "E501",
+    "D400",
+    "D415",
+    "D205",
+    "D301",
+    "D107",
+    "D105",
+    "D102",
+    "D103",
+    "D101",
     "D203",  # conflicts with D211 (blank line before class)
     "D213",  # conflicts with D212 (multi-line summary)
 ]

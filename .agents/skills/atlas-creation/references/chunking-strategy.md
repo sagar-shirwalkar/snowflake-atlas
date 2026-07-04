@@ -43,10 +43,10 @@ def chunk_markdown(text: str, publication: str, file: str) -> list[dict]:
 
 **Expected frontmatter fields** (carried into every chunk):
 ```yaml
-title: "Incident Management"
-product_area: "IT Service Management"
+title: "Document Title"
+product_area: "Product Area"
 last_updated: "2026-01-15"
-canonical_url: "https://docs.servicenow.com/.../incident-management.html"
+canonical_url: "https://docs.example.com/path/to/page.html"
 ```
 
 ### 2. H2 Splitting
@@ -153,7 +153,7 @@ def _hard_split(text: str, max_chars: int = 8000) -> list[str]:
 | Paragraph-based | Natural breaks | Too granular; loses section context | ✗ |
 | Semantic (LLM) | Optimal boundaries | Slow; non-deterministic; model-dependent | ✗ |
 
-**Key insight**: The ServiceNowDocs (and similar) repos are **authored for LLMs** — one topic per file, H2 = sub-topic. The chunk size *is* the author's intent.
+**Key insight**: Many doc repos are **authored for LLMs** — one topic per file, H2 = sub-topic. The chunk size *is* the author's intent.
 
 ## Edge Cases Handled
 

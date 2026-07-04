@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import math
@@ -52,7 +53,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .bm25_search import build_index as build_bm25_index
+from .bm25_search import build_fielded_index as build_bm25_index
 from .bm25_search import save_index as save_bm25_index
 from .chunk import chunk_file
 from .embed import (
@@ -72,8 +73,7 @@ logger = get_logger()
 _CLUSTER_BOOST_WEIGHT = 0.03  # sibling/path boost at query time
 
 DEFAULT_BRANCH = "main"
-DEFAULT_REPO_URL = "https://github.com/ServiceNow/ServiceNowDocs.git"
-DEFAULT_LOCAL_PATH = "./data/servicenow-docs/ServiceNowDocs-australia"
+DEFAULT_LOCAL_PATH = "./data/snowflake-docs"
 
 BUNDLE_SCHEMA_VERSION = 1
 
@@ -388,14 +388,48 @@ def write_manifest(
     return out
 
 
+def _check_manifest_source(manifest_path: Path) -> None:
+    """Verify the persisted manifest points to Snowflake docs."""
+    try:
+        manifest = json.loads(manifest_path.read_text())
+        source_repo = manifest.get("source_repo", "")
+        expected = "https://docs.snowflake.com"
+        if source_repo != expected:
+            logger.warning(
+                "Manifest source_repo does not match expected Snowflake docs URL",
+                expected=expected,
+                got=source_repo,
+                hint="Check that --mirror-path or --repo-url points to the correct docs source",
+            )
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Could not verify manifest source", error=str(e))
+
+
+def _print_summary(title: str, output_dir: Path, chunk_count: int, dim: int | None = None) -> None:
+    """Print the final build summary banner."""
+    manifest_path = output_dir / "manifest.json"
+    source_repo = "?"
+    if manifest_path.is_file():
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            source_repo = json.loads(manifest_path.read_text()).get("source_repo", "?")
+    print("\n" + "=" * 60)
+    print(f"  {title}")
+    print(f"    source   : {source_repo}")
+    print(f"    chunks   : {chunk_count}")
+    if dim is not None:
+        print(f"    dim      : {dim}")
+    print(f"    path     : {output_dir.resolve()}")
+    print("=" * 60)
+
+
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for the bundle build command."""
     p = argparse.ArgumentParser(description="Build the Atlas RAG bundle")
-    p.add_argument("--source-type", choices=["git", "web-crawl", "local"], default="git", help="Source type")
+    p.add_argument("--source-type", choices=["git", "web-crawl", "local"], default="web-crawl", help="Source type")
 
     # Git source args
     p.add_argument("--repo-path", default=DEFAULT_LOCAL_PATH, help="Local path to git repo (git source)")
-    p.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="Git repo URL (git source)")
+    p.add_argument("--repo-url", default="", help="Git repo URL (git source)")
     p.add_argument("--branch", default=DEFAULT_BRANCH, help="Git branch (git source)")
 
     # Web-crawl/local source args
@@ -434,10 +468,16 @@ def _run() -> int:
     pq.write_table(table, chunks_path)
     logger.info("Wrote chunks", path=str(chunks_path))
 
-    # Build BM25 keyword index from chunk texts
+    # Build fielded BM25 keyword index from chunk texts + metadata
     texts = table.column("text").to_pylist()
-    logger.info("Building BM25 index", count=len(texts))
-    bm25_index = build_bm25_index(texts)
+    titles = [t or "" for t in table.column("title").to_pylist()]
+    headings = [h or "" for h in table.column("heading").to_pylist()]
+    # File path as a BM25 field — stems like "create-warehouse" are strong relevance signals
+    file_paths = [f.replace(".md", "") if f else "" for f in table.column("file").to_pylist()]
+    field_texts = {"text": texts, "title": titles, "heading": headings, "file_path": file_paths}
+    field_weights = {"text": 1.0, "title": 3.0, "heading": 2.0, "file_path": 2.5}
+    logger.info("Building fielded BM25 index", count=len(texts), fields=list(field_texts.keys()))
+    bm25_index = build_bm25_index(field_texts, field_weights)
     bm25_path = args.output / "bm25.pkl"
     save_bm25_index(bm25_index, bm25_path)
     logger.info("Wrote BM25 index", path=str(bm25_path), size=f"{bm25_path.stat().st_size / 1024:.1f} KB")
@@ -451,6 +491,8 @@ def _run() -> int:
             args.model,
             embedding_dim=768,
         )
+        _check_manifest_source(args.output / "manifest.json")
+        _print_summary("Bundle ready (--skip-embed).", args.output, len(table))
         return 0
 
     backend, reason = resolve_backend(args.prefer)
@@ -486,10 +528,8 @@ def _run() -> int:
     )
     logger.info("Wrote manifest", path=str(manifest_path))
 
-    print("\n  Bundle ready.")
-    print(f"    chunks : {len(table)}")
-    print(f"    dim    : {embeddings.shape[1]}")
-    print(f"    path   : {args.output.resolve()}")
+    _check_manifest_source(manifest_path)
+    _print_summary("Bundle ready.", args.output, len(table), dim=embeddings.shape[1])
     return 0
 
 

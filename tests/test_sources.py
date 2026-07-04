@@ -103,7 +103,7 @@ class TestWebCrawlSource:
         meta = source.get_metadata(f)
         assert meta["publication"] == "docs"
         assert meta["file"] == "page.md"
-        assert meta["repo_url"] == "https://docs.snowflake.com"
+        assert meta["repo_url"] == "unknown"
 
     def test_with_crawl_meta(self, tmp_path: Path):
         (tmp_path / "docs").mkdir()

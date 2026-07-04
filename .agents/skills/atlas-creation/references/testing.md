@@ -25,7 +25,7 @@ uv run pytest tests/test_chunk.py -v
 uv run pytest tests/ --cov=atlas --cov-report=term-missing
 
 # Smoke test (full E2E)
-atlas-smoke --bundle ./data/rag-bundle --repo ./data/servicenow-docs/ServiceNowDocs-australia
+atlas-smoke --bundle ./data/rag-bundle --repo ./data/docs-mirror
 ```
 
 ## Test Fixtures
@@ -413,8 +413,7 @@ def test_download_verify_sha(tmp_path, mock_github_api, monkeypatch):
 
 ```bash
 # Run manually
-atlas-smoke --bundle ./data/rag-bundle --repo ./data/servicenow-docs/ServiceNowDocs-australia
-
+atlas-smoke --bundle ./data/rag-bundle --repo ./data/docs-mirror
 # What it tests:
 # 1. FS server: list_publications, list_files, read_file, search, get_release_info
 # 2. RAG server: search_docs, search_code, get_chunk, get_bundle_info
@@ -429,8 +428,8 @@ atlas-smoke --bundle ./data/rag-bundle --repo ./data/servicenow-docs/ServiceNowD
 atlas-evaluate --bundle ./data/rag-bundle --golden ./eval/golden.jsonl
 
 # Golden set format (JSONL):
-{"query": "how to create incident", "expected_files": ["it-service-management/incident-management.md"]}
-{"query": "glideRecord query", "expected_files": ["scripting/glide-record.md", "scripting/glide-aggregate.md"]}
+{"query": "how to create a table", "expected_files": ["backend/table-creation.md"]}
+{"query": "Database query", "expected_files": ["backend/database-query.md"]}
 
 # Metrics:
 # - Precision@10: fraction of top-10 results that are in expected_files

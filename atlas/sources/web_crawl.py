@@ -6,7 +6,10 @@ import json
 from collections.abc import Iterator
 from pathlib import Path
 
+from ..log import get_logger
 from .base import MarkdownSource
+
+logger = get_logger()
 
 
 class WebCrawlSource(MarkdownSource):
@@ -29,9 +32,9 @@ class WebCrawlSource(MarkdownSource):
             crawl_meta_path = self.mirror_root / "crawl_meta.json"
         if crawl_meta_path.is_file():
             return json.loads(crawl_meta_path.read_text())
-        # Fallback for backwards compatibility
+        logger.warning("crawl_meta.json not found, source URL will be unknown", path=str(crawl_meta_path))
         return {
-            "source_url": "https://docs.snowflake.com",
+            "source_url": "unknown",
             "crawled_at": "unknown",
             "crawler_sha": "unknown",
         }
@@ -49,7 +52,7 @@ class WebCrawlSource(MarkdownSource):
         return {
             "publication": parts[0] if parts else "unknown",
             "file": "/".join(parts[1:]) if len(parts) > 1 else parts[0],
-            "repo_url": self.crawl_meta.get("source_url", "https://docs.snowflake.com"),
+            "repo_url": self.crawl_meta.get("source_url", "unknown"),
             "branch": f"crawl-{self.crawl_meta.get('crawled_at', 'unknown')[:10]}",
             "sha": self.crawl_meta.get("crawler_sha", "unknown"),
         }
@@ -59,6 +62,6 @@ class WebCrawlSource(MarkdownSource):
         return {
             "branch": f"crawl-{self.crawl_meta.get('crawled_at', 'unknown')[:10]}",
             "sha": self.crawl_meta.get("crawler_sha", "unknown"),
-            "repo_url": self.crawl_meta.get("source_url", "https://docs.snowflake.com"),
+            "repo_url": self.crawl_meta.get("source_url", "unknown"),
             "file_count": sum(1 for _ in self.walk_markdown()),
         }

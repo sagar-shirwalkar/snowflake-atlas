@@ -1,6 +1,6 @@
 ---
 name: atlas-creation
-description: Build a local-first AI knowledge layer (Atlas) for any markdown documentation corpus via two MCP servers (filesystem + RAG). Use when the user wants to create an Atlas system for a new documentation source — e.g., "build an Atlas for Snowflake docs", "create a knowledge layer for Kubernetes docs", "set up dual MCP servers for my markdown repo". Branches: build-atlas (full pipeline), build-fs-server (filesystem only), build-rag-server (RAG only), build-bundle (precompute embeddings), eval-rag (measure retrieval quality).
+description: Build a local-first AI knowledge layer (Atlas) for any markdown documentation corpus via two MCP servers (filesystem + RAG). Use when the user wants to create an Atlas system for a new documentation source — e.g., "build an Atlas for Kubernetes docs", "create a knowledge layer for OpenStack docs", "set up dual MCP servers for my markdown repo". Branches: build-atlas (full pipeline), build-fs-server (filesystem only), build-rag-server (RAG only), build-bundle (precompute embeddings), eval-rag (measure retrieval quality).
 disable-model-invocation: false
 ---
 
@@ -12,7 +12,7 @@ An **Atlas** is a local-first AI knowledge layer built from a markdown documenta
 
 The bundle is built **once** by the maintainer (`atlas-build`), distributed as a single artifact, and consumed by end users with zero embedding/chunking/model work.
 
-This skill is **platform-agnostic**. Snowflake-specific, Kubernetes-specific, etc. configs live in separate skills.
+This skill is **platform-agnostic**. Corpus-specific configs (repo URLs, branch names, model IDs) live in separate skills.
 
 ---
 
@@ -77,7 +77,7 @@ pass per query token.
 
 **Idea:** Dense embedding search captures semantic similarity but misses exact term
 matches. BM25 keyword search captures term precision but misses semantically related
-content. Reciprocal Rank Fusion (RRF) combines both. Making hybrid the default means
+misses. Score-level fusion (weighted sum of normalised BM25 and dense cosine similarity) combines both. Making hybrid the default means
 clients get better recall without any configuration.
 
 **Implementation:**
@@ -86,6 +86,7 @@ clients get better recall without any configuration.
   `search_code` tools.
 - Fusion formula: `0.6 * dense_score + 0.4 * bm25_norm` (weights tuned empirically).
 - BM25 index built at bundle-build time via `rank-bm25::BM25Okapi` from chunk texts.
+- Default BM25 parameters: `k1=2.0, b=0.7` (tuned for longer reference docs — higher TF saturation ceiling, reduced length normalisation penalty).
 - Graceful fallback: if `bm25.pkl` is missing (older bundles), hybrid falls back to
   title-boost heuristic with a log warning.
 
@@ -120,7 +121,54 @@ HF-downloaded ONNX model. Adds ~5 ms/query on Apple Silicon, ~50-200 ms on CPU.
 
 ---
 
-### 5. Contextual Retrieval
+### 5. Fielded BM25 with File-Path Signals
+
+**Idea:** Standard BM25 treats every document as a bag of words from the body
+text. Fielded BM25 gives the index a notion of document structure by building
+separate BM25 instances per field (body text, title, heading, file path) and
+combining their scores at query time as a weighted sum. This lets the index
+reward matches in semantically important fields (a match in the title or
+filename is more relevant than a match deep in the body).
+
+**Implementation (build-time):**
+
+- `atlas/bm25_search.py::build_fielded_index()` accepts a dict of
+  `field_name -> list[document_text]` and a dict of `field_name -> weight`.
+- Builds a separate `BM25Okapi` instance per field, each with the same
+  tuned parameters (`k1=2.0, b=0.7`).
+- Scores are combined at query time: `final_score = sum(weight_f * bm25_f(tokens))`.
+- Persisted as a version-2 pickle with backward-compatible loading (old
+  version-1 pickles still work).
+
+**Default field weights:**
+
+| Field | Weight | Rationale |
+|-------|--------|-----------|
+| `text` (body) | 1.0 | Baseline — the main content |
+| `heading` | 2.0 | Section headings summarise the chunk's topic |
+| `file_path` | 2.5 | Filename stems are expert-curated relevance tags |
+| `title` | 3.0 | Document titles are concise human-written summaries |
+
+**File-path field in detail:** The file path of each markdown document is
+treated as a separate BM25 field. Filenames in well-structured documentation
+corpuses are hand-crafted identifiers that directly encode topic relevance:
+
+```
+sql-reference/sql/create-warehouse.md   → tokens: sql, reference, sql, create, warehouse
+user-guide/warehouses-considerations.md  → tokens: user, guide, warehouses, considerations
+```
+
+The `.md` extension is stripped before tokenization so the tokenizer produces
+clean, meaningful tokens. A query containing "create warehouse" matches
+directly against the file-path tokens of `create-warehouse.md`.
+
+**Cost profile:** Zero query-time LLM cost. Build-time overhead is negligible
+(~1-2 s for 250k chunks). Query-time scoring iterates over fields (microseconds).
+Pickle size increases marginally (~100 KB for 50k chunks with 4 fields).
+
+---
+
+### 6. Contextual Retrieval
 
 **Source:** [Anthropic Blog — Introducing Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval) (Sep 2024)
 
@@ -137,11 +185,11 @@ model, so the vector representation captures both the chunk content _and_ its ro
 **Claimed impact:** Anthropic reports up to **49% reduction in retrieval failure rate** compared to
 naive chunking without context — the single highest-leverage improvement in their test suite.
 
-**Status in Snowflake Atlas:** Planned, not yet implemented. Context generation requires LLM calls
+**Status:** Planned, not yet implemented. Context generation requires LLM calls
 at build time, so it depends on provider selection (local via MLX, Claude API, OpenRouter, HF).
 The best-quality results come from frontier models (Claude 3.5 Haiku/Sonnet), but smaller local
 models (Qwen 2.5 7B, Phi-3-mini) can produce adequate context for simpler chunks. Consider
-Contextual Retrieval after the four build-time-only techniques above are exhausted.
+Contextual Retrieval after the build-time-only techniques above are exhausted.
 
 ---
 
@@ -231,7 +279,7 @@ and searched in a single pass) but requires a specialized inference pipeline. Th
 cross-encoder reranker is simpler to integrate as a second-pass re-ranker on top
 of existing dense+hybrid results.
 
-**Status in Snowflake Atlas:** Not implemented. ColBERT's late interaction is a
+**Status:** Not implemented. ColBERT's late interaction is a
 promising direction for a future retrieval upgrade, particularly for the hybrid
 search pipeline where it could replace the separate BM25 + dense fusion with a
 single unified retriever.
@@ -246,7 +294,8 @@ single unified retriever.
 | Path-aware retrieval boost | Hierarchical FS Chunking (#2) | Low | Medium | Build-time sibling map, query-time substring match |
 | Maximum recall without config | Hybrid Search as Default (#3) | Low | High | Build-time BM25 indexing, zero query-time LLM |
 | Precision boost for top results | Cross-Encoder Reranker (#4) | Medium | High | Build-time weight conversion, passive at query |
-| Context-disambiguated chunks | Contextual Retrieval (#5) | High | High | Build-time LLM call per chunk, zero query-time cost |
+| Structured keyword relevance | Fielded BM25 + File-Path (#5) | Low | Medium | Build-time per-field indexing, zero query-time cost |
+| Context-disambiguated chunks | Contextual Retrieval (#6) | High | High | Build-time LLM call per chunk, zero query-time cost |
 | Unified dense+sparse retrieval | ColBERT (Future) | High | High | Specialized indexing pipeline, single-pass search |
 
 ## Core concepts (leading words)
@@ -259,6 +308,8 @@ single unified retriever.
 - **overlap** — tail of previous H2 section prepended to next for boundary-spanning queries (150 chars default)
 - **cluster-tags** — space-joined sibling document stems in the same directory, used for path-aware relevance boost
 - **hybrid-default** — RAG server defaults to hybrid (dense + BM25) mode; client can override per-query
+- **fielded-bm25** — multi-field BM25 index (text + title + heading + file_path) with per-field weights, built at bundle time
+- **file-path-bm25** — document file paths as BM25 field tokens; filenames like `create-warehouse` are expert-curated relevance signals
 - **reranker** — optional cross-encoder (MLX or ONNX) that re-scores top-100 candidates for precision
 - **doctor** — diagnostic probe (`atlas-doctor`) showing platform, backend probes, selected backend + reason
 - **source-adapter** — pluggable interface to fetch markdown from git, web crawl, local dir, or API
@@ -275,7 +326,7 @@ single unified retriever.
 | 3 | Embedding backends (`atlas/embed/`) | 3 backends (MLX, ONNX-CUDA, ONNX-CPU); factory picks best at runtime |
 | 4 | FS MCP server (`atlas/fs_server.py`) | 5 tools registered; deterministic; ripgrep-backed; path traversal blocked |
 | 5 | RAG MCP server (`atlas/rag_server.py`) | 4 tools registered; bundle loaded once; cosine via matrix multiply; hybrid as default mode |
-| 6 | Bundle builder (`atlas/make_bundle.py`) | End-to-end: fetch → chunk (w/ overlap + cluster_tags) → embed → BM25 index → write artifacts → stage model → manifest w/ SHA256 |
+| 6 | Bundle builder (`atlas/make_bundle.py`) | End-to-end: fetch → chunk (w/ overlap + cluster_tags) → embed → fielded BM25 index (text + title + heading + file_path) → write artifacts → stage model → manifest w/ SHA256 |
 | 7 | Download + verify (`atlas/download.py`) | GitHub Releases download; SHA256 verify; backup existing before overwrite |
 | 8 | Utilities | backup, restore, doctor, smoke_test, evaluate, log, rerank (MLX + ONNX) — all working standalone |
 | 9 | Tests (`tests/`) | Pytest suite passes: chunker (incl. overlap), embed backends, FS/RAG servers, bundle build, BM25, reranker |
@@ -315,8 +366,8 @@ class MarkdownSource(ABC):
 
 | Adapter | Source Type | Use Case |
 |---------|-------------|----------|
-| `GitSource` | Git repository | ServiceNow, Kubernetes, self-hosted docs |
-| `WebCrawlSource` | Local mirror from web crawl | Snowflake, AWS, Azure docs (no public git) |
+| `GitSource` | Git repository | Publicly maintained docs (Kubernetes, open-source projects) |
+| `WebCrawlSource` | Local mirror from web crawl | Docs without public git mirrors (cloud platforms, SaaS) |
 | `LocalSource` | Local directory | Ad-hoc collections, private docs |
 | `APISource` | REST/GraphQL API | Notion, GitBook, Confluence exports |
 
@@ -346,14 +397,14 @@ class GitSource(MarkdownSource):
         }
 ```
 
-### WebCrawlSource (for Snowflake)
+### WebCrawlSource
 
 ```python
 # atlas/sources/web_crawl.py
 class WebCrawlSource(MarkdownSource):
     def __init__(self, mirror_root: Path, crawl_meta: dict):
         self.mirror_root = mirror_root
-        self.crawl_meta = crawl_meta  # {'source_url': 'https://docs.snowflake.com', 'crawled_at': '...'}
+        self.crawl_meta = crawl_meta  # {'source_url': 'https://docs.example.com', 'crawled_at': '2025-01-01'}
     
     def walk_markdown(self) -> Iterator[Path]:
         return self.mirror_root.rglob("*.md")
@@ -377,7 +428,7 @@ class WebCrawlSource(MarkdownSource):
 atlas-build --source-type git --repo-path ./data/docs --repo-url https://github.com/org/docs.git --branch main --output ./bundle
 
 # Web crawl source
-atlas-build --source-type web-crawl --mirror-path ./data/snowflake-docs --crawl-meta ./data/snowflake-docs/crawl_meta.json --output ./bundle
+atlas-build --source-type web-crawl --mirror-path ./data/docs-mirror --crawl-meta ./data/docs-mirror/crawl_meta.json --output ./bundle
 
 # Local directory
 atlas-build --source-type local --mirror-path ./my-docs --output ./bundle
@@ -387,7 +438,7 @@ atlas-build --source-type local --mirror-path ./my-docs --output ./bundle
 
 ## Configuration (for platform-specific skills)
 
-A separate skill (e.g., `snowflake-atlas-config`) provides corpus-specific values:
+A separate platform-specific skill provides corpus-specific values:
 
 ```python
 # Git-based source
@@ -398,8 +449,8 @@ REPO_LOCAL_PATH = "./data/<org>-docs/<repo>-<branch>"
 
 # Web-crawl source
 SOURCE_TYPE = "web-crawl"
-MIRROR_PATH = "./data/snowflake-docs/snowflake-docs-main"
-CRAWL_META = "./data/snowflake-docs/crawl_meta.json"
+MIRROR_PATH = "./data/docs-mirror"
+CRAWL_META = "./data/docs-mirror/crawl_meta.json"
 
 # Shared
 DEFAULT_MODEL_ID = "Xenova/bge-base-en-v1.5"
@@ -426,8 +477,8 @@ atlas-build --source-type git \
 
 # 2b. Build from web crawl mirror (maintainer)
 atlas-build --source-type web-crawl \
-    --mirror-path ./data/snowflake-docs \
-    --crawl-meta ./data/snowflake-docs/crawl_meta.json \
+    --mirror-path ./data/docs-mirror \
+    --crawl-meta ./data/docs-mirror/crawl_meta.json \
     --output ./data/rag-bundle
 
 # 3. Test

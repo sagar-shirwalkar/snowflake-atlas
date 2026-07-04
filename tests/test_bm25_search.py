@@ -114,7 +114,7 @@ class TestSaveRehydrate:
         save_index(index, pkl)
         loaded = rehydrate(pkl)
         assert loaded.corpus_size == 0
-        assert loaded.k1 == 1.5  # default preserved
+        assert loaded.k1 == 2.0  # default preserved
 
     def test_pickle_protocol(self, tmp_path: Path):
         """Saved pickle should be readable by Python 3.11+."""

@@ -11,9 +11,10 @@ the entire [Snowflake documentation](https://docs.snowflake.com/) to any AI agen
   No model, no embeddings, no state. ~zero startup.
 
 - **snowflake-rag** — semantic search over precomputed embeddings plus
-  optional BM25 keyword search. Tools: search_docs, search_code, get_chunk,
-  get_bundle_info. Three modes: `vector` (dense), `keyword` (BM25), `hybrid`
-  (RRF-fused). Loads a portable bundle once at startup (~1 GB); answers
+  fielded BM25 keyword search with title/heading/file-path weighting. Tools:
+  search_docs, search_code, get_chunk, get_bundle_info. Three modes:
+  `vector` (dense), `keyword` (fielded BM25), `hybrid` (score-level fusion).
+  Loads a portable bundle once at startup (~1 GB); answers
   queries in ~1-2 ms (MLX on Apple Silicon) or ~50-200 ms (ONNX+CPU).
 
 The RAG bundle is **built once** by the maintainer locally, then distributed
@@ -80,7 +81,7 @@ server and a RAG server buys:
 | **Chunk metadata** | Includes `cluster_tags` — space-joined sibling stems in the same directory | Enables path-aware relevance boost at query time without re-embedding. |
 | **Distribution** | GitHub Releases (per-tag) | Simple, free, CLI-friendly API. End users download with one command. |
 | **Doc crawler** | aiohttp + optional Camoufox stealth | Async, rate-limited, with jitter and rotating User-Agent pool. See [crawler docs](#9-troubleshooting). |
-| **Keyword search** (build-time) | `rank-bm25` BM25Okapi | Indexed at bundle-build time from chunk texts. Pickled state (~a few MB for 250k docs). Enables `keyword` and `hybrid` search modes. |
+| **Keyword search** (build-time) | `rank-bm25` BM25Okapi (fielded) | Indexed at bundle-build time from chunk texts + titles + headings + file paths with per-field weights (text=1.0, title=3.0, heading=2.0, file_path=2.5). Pickled state (~a few MB for 250k docs). Enables `keyword` and `hybrid` search modes. |
 | **Re-ranking** (opt-in) | `BAAI/bge-reranker-v2-base` (MLX) or `cross-encoder/ms-marco-MiniLM-L6-v2` (ONNX) | 110M params (MLX), 22.7M params (ONNX). Auto-selects MLX on Apple Silicon, falls back to ONNX. Enabled with `--rerank`. |
 | **Package management** | `uv` | Fast resolver, lockfile, virtualenv, build system. |
 
@@ -475,7 +476,8 @@ and ``atlas-build --prefer apple`` will use the ANE/GPU accelerator.
 ### 5.2 Build RAG bundle
 
 The build pipeline runs: crawl → chunk (with overlap + cluster_tags) →
-embed → BM25 index → write artifacts → stage model → manifest.
+embed → fielded BM25 index (text + title + heading + file_path) →
+write artifacts → stage model → manifest.
 
 ```bash
 # Full build
@@ -495,9 +497,10 @@ uv run atlas-build \
 ```
 
 The build writes a `manifest.json` with the source SHA, chunk count,
-BM25 index size, model ID, and SHA256 of each artifact. The BM25 index
-is built automatically from chunk texts using `rank-bm25::BM25Okapi`
-and saved as `bm25.pkl` in the bundle directory.
+BM25 index size, model ID, and SHA256 of each artifact. A **fielded
+BM25 index** is built automatically from chunk texts, titles, headings,
+and file paths with per-field weights (text=1.0, title=3.0, heading=2.0,
+file_path=2.5) via `rank-bm25::BM25Okapi` and saved as `bm25.pkl`.
 
 ### 5.3 Validate
 
@@ -598,7 +601,7 @@ flowchart LR
     subgraph Build["🔨 Bundle Builder"]
         CHUNK["atlas-build<br/>chunk → embed → write → bm25"]
         MODEL[("bge-base-en-v1.5<br/>embedding model")]
-        BM25_BUILD[("rank-bm25<br/>BM25Okapi indexing")]
+        BM25_BUILD[("rank-bm25<br/>Fielded BM25<br/>text+title+heading+file_path")]
     end
 
     subgraph Bundle["📦 RAG Bundle"]
@@ -723,7 +726,7 @@ when something is wrong.
 | Command | Description |
 |---------|-------------|
 | `snowflake-fs` | Filesystem MCP server (ripgrep-based) |
-| `snowflake-rag` | RAG MCP server (vector, keyword, hybrid search) |
+| `snowflake-rag` | RAG MCP server (vector, fielded BM25 keyword, hybrid search) |
 | `atlas-build` | Build RAG bundle from source |
 | `atlas-download` | Download bundle from GitHub Releases |
 | `atlas-backup` | Snapshot current bundle |
@@ -765,9 +768,9 @@ The `snowflake-rag` server supports three search modes, selected via the
 
 | Mode | How it works | Best for |
 |------|-------------|----------|
-| `hybrid` (default) | Reciprocal Rank Fusion of vector + BM25 results | Maximum recall — catches what either method misses |
+| `hybrid` (default) | Score-level fusion (0.6 × vector + 0.4 × normalised BM25) | Maximum recall — catches what either method misses |
 | `vector` | Cosine similarity on dense embeddings only | General-purpose semantic search |
-| `keyword` | BM25Okapi term-frequency scoring (requires `bm25.pkl` in bundle) | Exact identifier lookups (SQL functions, error codes, config options) |
+| `keyword` | Fielded BM25Okapi (body + title + heading + file-path scoring with per-field weights) | Exact identifier lookups (SQL functions, error codes, config options) |
 
 **The mode is per-query**, so a client can use `keyword` for a SQL
 function lookup (`TO_DATE`), `vector` for fuzzy concept search (`"how
@@ -776,6 +779,34 @@ do I set up RBAC"`), and `hybrid` (the default) when coverage matters most.
 The BM25 index is built at bundle-build time. If a bundle lacks
 `bm25.pkl` (older bundles), `keyword` and `hybrid` fall back to
 a simple title-boost heuristic automatically — no crash, no error.
+
+**Try the difference.** Point any of these at your built bundle:
+
+```bash
+# Hybrid — score-level fusion of vector + BM25 (best overall recall)
+uv run python -c "
+from atlas.rag_server import Bundle
+b = Bundle('./data/snowflake-rag-bundle')
+for r in b.search('how to set up RBAC', top_k=3, mode='hybrid'):
+    print(f'  {r[\"score\"]:.3f}  {r[\"file\"]} :: {r[\"heading\"]}')
+"
+
+# Vector — pure dense embedding similarity
+uv run python -c "
+from atlas.rag_server import Bundle
+b = Bundle('./data/snowflake-rag-bundle')
+for r in b.search('how to set up RBAC', top_k=3, mode='vector'):
+    print(f'  {r[\"score\"]:.3f}  {r[\"file\"]} :: {r[\"heading\"]}')
+"
+
+# Keyword — fielded BM25 (title/heading/file-path boosted, best for exact names)
+uv run python -c "
+from atlas.rag_server import Bundle
+b = Bundle('./data/snowflake-rag-bundle')
+for r in b.search('TO_DATE', top_k=3, mode='keyword'):
+    print(f'  {r[\"score\"]:.3f}  {r[\"file\"]} :: {r[\"heading\"]}')
+"
+```
 
 ---
 
@@ -820,6 +851,38 @@ top-100 candidates from hybrid search using a joint query-passage model.
   22.7M params, auto-downloaded from Hugging Face.
 - Auto-selects MLX if available, falls back to ONNX.
 - Adds ~5 ms/query (MLX) or ~50-200 ms (ONNX+CPU).
+
+---
+
+### Fielded BM25 with File-Path Signals
+
+The keyword search index is built as a **fielded BM25** that scores matches
+in the body text, title, heading, and file path independently, then combines
+them as a weighted sum:
+
+| Field | Weight | Why |
+|-------|--------|-----|
+| `text` (body) | 1.0 | Baseline — the main content |
+| `heading` | 2.0 | Section headings summarise the chunk's topic |
+| `file_path` | 2.5 | Filename stems like `create-warehouse` are expert-curated relevance tags |
+| `title` | 3.0 | Document titles are concise human-written summaries |
+
+BM25 parameters are tuned for long reference docs: `k1=2.0` (higher TF
+saturation ceiling) and `b=0.7` (reduced length normalisation penalty).
+
+The file-path field works because Snowflake's `.md` filenames are
+descriptive identifiers — a query for "create warehouse" directly matches
+the path tokens of `sql-reference/sql/create-warehouse.md`. The `.md`
+extension is stripped before tokenization so only meaningful tokens remain.
+
+- **Build-time:** `atlas/make_bundle.py` extracts the `file` column and
+  passes it as the `file_path` field to `build_fielded_index()`.
+- **Query-time:** `atlas/bm25_search.py::FieldedBM25Index` computes per-field
+  scores and combines them — `rag_server.py` doesn't need to know about fields.
+- **Persisted:** Fields and weights are baked into `bm25.pkl` (version 2
+  format). Version 1 pickles still load via backward compatibility.
+- **Cost:** Zero query-time LLM cost. Build-time overhead ~1-2 s for 250k
+  chunks. Pickle increases ~100 KB for 50k chunks with 4 fields.
 
 ---
 
@@ -1062,20 +1125,29 @@ documentation areas (warehouses, Cortex AI, Snowpipe, dynamic tables,
 security, Iceberg, search optimization, etc.). To evaluate retrieval quality:
 
 ```bash
-# Default: hybrid search (dense + BM25 fusion)
+# Vector search (cosine similarity on dense embeddings)
 uv run atlas-evaluate \
   --bundle ./data/snowflake-rag-bundle \
   --golden ./data/golden_set.jsonl \
   --prefer apple \
   --top-k 5
 
-# Compare with pure dense vector search:
+# With cross-encoder re-ranker (more accurate, slower)
+uv run atlas-evaluate \
+  --bundle ./data/snowflake-rag-bundle \
+  --golden ./data/golden_set.jsonl \
+  --prefer apple \
+  --top-k 5 \
+  --rerank
+
+# Compare keyword vs vector on a specific query:
 uv run python -c "
 from atlas.rag_server import Bundle
 b = Bundle('./data/snowflake-rag-bundle', prefer='apple')
-results = b.search('how to create a virtual warehouse', top_k=20, mode='vector')
-for r in results:
-    print(f'{r[\"score\"]:.3f}  {r[\"file\"]}')
+for mode in ('keyword', 'vector', 'hybrid'):
+    print(f'--- {mode} ---')
+    for r in b.search('how to create a virtual warehouse', top_k=5, mode=mode):
+        print(f'  {r[\"score\"]:.3f}  {r[\"file\"]}')
 "
 ```
 

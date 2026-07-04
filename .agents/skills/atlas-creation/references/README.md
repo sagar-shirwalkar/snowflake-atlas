@@ -24,7 +24,7 @@ This directory contains the reference documentation for the **atlas-creation** s
 
 1. **Read** `SKILL.md` — understand the 10 phases
 2. **Reference** the architecture and bundle format docs as you implement
-3. **Configure** a platform-specific skill (e.g., `snowflake-atlas-config`) with:
+3. **Configure** a platform-specific skill with:
    - `REPO_URL`, `BRANCH`, `DEFAULT_MODEL_ID`
    - `BUNDLE_OUTPUT`, `REPO_LOCAL_PATH`
 4. **Run** the build: `atlas-build --repo-url ... --branch ... --output ...`
@@ -58,15 +58,15 @@ atlas-creation/
 
 ## Extending for a New Platform
 
-Create a **separate skill** (e.g., `snowflake-atlas-config`) that provides:
+Create a **separate skill** that provides corpus-specific configuration:
 
 ```python
 # In the skill's reference or as defaults
-REPO_URL = "https://github.com/Snowflake-Labs/snowflake-docs.git"
+REPO_URL = "https://github.com/Org/docs-repo.git"
 BRANCH = "main"
 DEFAULT_MODEL_ID = "Xenova/bge-base-en-v1.5"
 BUNDLE_OUTPUT = "./data/rag-bundle"
-REPO_LOCAL_PATH = "./data/snowflake-docs/snowflake-docs-main"
+REPO_LOCAL_PATH = "./data/org-docs/docs-repo-main"
 ```
 
 The atlas-creation skill remains **platform-agnostic** — all corpus-specific values are injected via CLI args or config.

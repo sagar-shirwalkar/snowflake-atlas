@@ -4,7 +4,7 @@ Markdown → chunks. Splits on `## ` headers, parses YAML frontmatter,
 flags code-containing chunks, falls back to paragraph splitting for
 oversized sections. No AST, no regex horrors.
 
-The Snowflake docs (like ServiceNowDocs) authors already chose their
+The Snowflake docs  authors already chose their
 chunk size: one `.md` file per topic, with `##` (H2) sections as natural
 sub-chunks. This module respects that structure instead of imposing a
 sliding-window splitter that would cut across the docs team's

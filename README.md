@@ -1200,26 +1200,11 @@ retrieval strategy independently against the golden set.
 The golden set is to be placed at `data/golden_set.jsonl`. Example:
 
 ```jsonl
-{"query": "how to create a virtual warehouse in snowflake", "expected_files": ["user-guide/warehouses.md", "sql-reference/sql/create-warehouse.md", "user-guide/warehouses-tasks.md"], "expected_publications": ["markdown"]}
-{"query": "snowflake cortex agents setup and configuration", "expected_files": ["user-guide/snowflake-cortex/cortex-agents-setup.md", "user-guide/snowflake-cortex/cortex-agents.md"], "expected_publications": ["markdown"]}
-{"query": "loading data with snowpipe", "expected_files": ["user-guide/data-load-snowpipe-intro.md", "user-guide/data-load-snowpipe-rest-load.md", "user-guide/data-load-snowpipe-auto-s3.md"], "expected_publications": ["markdown"]}
 {"query": "dynamic tables overview and use cases", "expected_files": ["user-guide/dynamic-tables/overview.md", "user-guide/dynamic-tables/create.md", "user-guide/dynamic-tables/refresh-modes.md"], "expected_publications": ["markdown"]}
 {"query": "snowflake access control and roles", "expected_files": ["user-guide/security-access-control-overview.md", "user-guide/security-access-control-configure.md"], "expected_publications": ["markdown"]}
 {"query": "time travel and fail-safe in snowflake", "expected_files": ["user-guide/data-time-travel.md", "user-guide/data-availability.md", "user-guide/data-failsafe.md"], "expected_publications": ["markdown"]}
 {"query": "sharing data across snowflake accounts", "expected_files": ["user-guide/data-sharing-intro.md", "user-guide/data-sharing-provider.md", "user-guide/data-sharing-gs.md"], "expected_publications": ["markdown"]}
 {"query": "cortex search hybrid search", "expected_files": ["user-guide/snowflake-cortex/cortex-search/cortex-search-overview.md", "user-guide/snowflake-cortex/cortex-search/query-cortex-search-service.md"], "expected_publications": ["markdown"]}
-{"query": "vector embeddings snowflake", "expected_files": ["user-guide/snowflake-cortex/vector-embeddings.md", "user-guide/snowflake-cortex/cortex-rest-api/embed-api.md"], "expected_publications": ["markdown"]}
-{"query": "querying semi-structured json data", "expected_files": ["user-guide/querying-semistructured.md", "user-guide/semistructured-intro.md", "user-guide/semistructured-considerations.md"], "expected_publications": ["markdown"]}
-{"query": "apache iceberg tables in snowflake", "expected_files": ["user-guide/tables-iceberg.md", "user-guide/tables-iceberg-create.md", "user-guide/tables-iceberg-manage.md"], "expected_publications": ["markdown"]}
-{"query": "multi-cluster warehouses scaling", "expected_files": ["user-guide/warehouses-multicluster.md", "user-guide/warehouses.md"], "expected_publications": ["markdown"]}
-{"query": "bulk loading from s3", "expected_files": ["user-guide/data-load-s3.md", "user-guide/data-load-s3-config.md", "user-guide/data-load-s3-copy.md"], "expected_publications": ["markdown"]}
-{"query": "streams and tasks for data pipelines", "expected_files": ["user-guide/streams-intro.md", "user-guide/tasks-intro.md", "user-guide/tasks-graphs.md"], "expected_publications": ["markdown"]}
-{"query": "optimizing query performance", "expected_files": ["user-guide/performance-query-options.md", "user-guide/performance-query-warehouse.md", "user-guide/query-acceleration-service.md"], "expected_publications": ["markdown"]}
-{"query": "managing snowflake costs", "expected_files": ["user-guide/cost-optimize.md", "user-guide/cost-management-overview.md", "user-guide/cost-controlling.md"], "expected_publications": ["markdown"]}
-{"query": "search optimization service", "expected_files": ["user-guide/search-optimization-service.md", "user-guide/search-optimization/enabling.md"], "expected_publications": ["markdown"]}
-{"query": "clustering keys and micro-partitions", "expected_files": ["user-guide/tables-clustering-micropartitions.md", "user-guide/tables-clustering-keys.md", "user-guide/tables-auto-reclustering.md"], "expected_publications": ["markdown"]}
-{"query": "snowflake key concepts and architecture", "expected_files": ["user-guide/intro-key-concepts.md", "user-guide/intro-supported-features.md"], "expected_publications": ["markdown"]}
-{"query": "create table sql syntax", "expected_files": ["sql-reference/sql/create-table.md", "sql-reference/sql/create-table-as-select.md"], "expected_publications": ["markdown"]}
 ```
 
 To add or customise queries, edit the file and re-run.

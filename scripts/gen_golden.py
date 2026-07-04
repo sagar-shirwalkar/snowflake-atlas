@@ -45,13 +45,9 @@ def get_markdown_files(root: Path) -> dict[str, list[Path]]:
             continue
         rel = p.relative_to(root)
         parts = rel.parts
-        if len(parts) > 1 and parts[-2] != "markdown":
-            group = str(Path(*parts[:-1]))
-        else:
-            group = "root"
+        group = "markdown" if len(parts) > 1 and parts[-2] != "markdown" else str(Path(*parts[:-1]))
         groups.setdefault(group, []).append(p)
     return groups
-
 
 # ── Query generators ──────────────────────────────────────────
 

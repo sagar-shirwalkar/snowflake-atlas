@@ -81,7 +81,7 @@ server and a RAG server buys:
 | **Chunk metadata** | Includes `cluster_tags` — space-joined sibling stems in the same directory | Enables path-aware relevance boost at query time without re-embedding. |
 | **Distribution** | GitHub Releases (per-tag) | Simple, free, CLI-friendly API. End users download with one command. |
 | **Doc crawler** | aiohttp + optional Camoufox stealth | Async, rate-limited, with jitter and rotating User-Agent pool. See [crawler docs](#9-troubleshooting). |
-| **Keyword search** (build-time) | `rank-bm25` BM25Okapi (fielded) | Indexed at bundle-build time from chunk texts + titles + headings + file paths with per-field weights (text=1.0, title=3.0, heading=2.0, file_path=2.5). Pickled state (~a few MB for 250k docs). Enables `keyword` and `hybrid` search modes. |
+| **Keyword search** (build-time) | `rank-bm25` BM25Okapi (fielded) + request-side query expansion (morphological variant generation) | Indexed at bundle-build time from chunk texts + titles + headings + file paths with per-field weights (text=1.0, title=3.0, heading=2.0, file_path=2.5). Pickled state (~a few MB for 250k docs). Query expansion bridges singular/plural and verb-form gaps without stemming the corpus. Enables `keyword` and `hybrid` search modes. |
 | **Re-ranking** (opt-in) | `BAAI/bge-reranker-v2-base` (MLX) or `cross-encoder/ms-marco-MiniLM-L6-v2` (ONNX) | 110M params (MLX), 22.7M params (ONNX). Auto-selects MLX on Apple Silicon, falls back to ONNX. Enabled with `--rerank`. |
 | **Package management** | `uv` | Fast resolver, lockfile, virtualenv, build system. |
 
@@ -768,7 +768,7 @@ The `snowflake-rag` server supports three search modes, selected via the
 
 | Mode | How it works | Best for |
 |------|-------------|----------|
-| `hybrid` (default) | Score-level fusion (0.6 × vector + 0.4 × normalised BM25) | Maximum recall — catches what either method misses |
+| `hybrid` (default) | Score-level fusion (0.6 × vector + 0.4 × normalised BM25) with interleaved candidate pool and AdaGReS heading-aware diversity ranking | Maximum recall with file-diverse top-k — no single file dominates the results |
 | `vector` | Cosine similarity on dense embeddings only | General-purpose semantic search |
 | `keyword` | Fielded BM25Okapi (body + title + heading + file-path scoring with per-field weights) | Exact identifier lookups (SQL functions, error codes, config options) |
 
@@ -779,6 +779,17 @@ do I set up RBAC"`), and `hybrid` (the default) when coverage matters most.
 The BM25 index is built at bundle-build time. If a bundle lacks
 `bm25.pkl` (older bundles), `keyword` and `hybrid` fall back to
 a simple title-boost heuristic automatically — no crash, no error.
+
+**Hybrid mode** additionally applies **heading-aware AdaGReS diversity ranking**
+to prevent a single file from dominating the top results. Chunks from different
+files are preferred; multiple chunks from the same file but different sections
+are partially penalised; truly redundant chunks (same file + same heading) are
+blocked. This is query-time only — no rebuild needed.
+
+**BM25** also benefits from **request-side query expansion**: morphological
+variants ("warehouse" ↔ "warehouses", "create" ↔ "creating") are generated
+automatically at query time without stemming the corpus. SQL identifiers pass
+through unchanged.
 
 **Try the difference.** Point any of these at your built bundle:
 
@@ -883,6 +894,13 @@ extension is stripped before tokenization so only meaningful tokens remain.
   format). Version 1 pickles still load via backward compatibility.
 - **Cost:** Zero query-time LLM cost. Build-time overhead ~1-2 s for 250k
   chunks. Pickle increases ~100 KB for 50k chunks with 4 fields.
+
+**Request-side query expansion (zero build cost):** BM25 automatically generates
+morphological variants at query time — ``"warehouse"`` also matches
+``"warehouses"`` and ``"warehousing"``; ``"create"`` also matches
+``"creating"`` and ``"created"``. The corpus is never modified or stemmed.
+Non-matching generated variants (e.g. ``"creat"``) contribute zero score.
+~0.01ms per query.
 
 ---
 
@@ -1130,7 +1148,24 @@ uv run atlas-evaluate \
   --bundle ./data/snowflake-rag-bundle \
   --golden ./data/golden_set.jsonl \
   --prefer apple \
-  --top-k 5
+  --top-k 5 \
+  --mode vector
+
+# Keyword search (fielded BM25 with query expansion)
+uv run atlas-evaluate \
+  --bundle ./data/snowflake-rag-bundle \
+  --golden ./data/golden_set.jsonl \
+  --prefer apple \
+  --top-k 5 \
+  --mode keyword
+
+# Hybrid search (vector + BM25 fusion with AdaGReS diversity)
+uv run atlas-evaluate \
+  --bundle ./data/snowflake-rag-bundle \
+  --golden ./data/golden_set.jsonl \
+  --prefer apple \
+  --top-k 5 \
+  --mode hybrid
 
 # With cross-encoder re-ranker (more accurate, slower)
 uv run atlas-evaluate \
@@ -1138,9 +1173,10 @@ uv run atlas-evaluate \
   --golden ./data/golden_set.jsonl \
   --prefer apple \
   --top-k 5 \
+  --mode hybrid \
   --rerank
 
-# Compare keyword vs vector on a specific query:
+# Compare all three modes on a specific query:
 uv run python -c "
 from atlas.rag_server import Bundle
 b = Bundle('./data/snowflake-rag-bundle', prefer='apple')
@@ -1158,7 +1194,8 @@ over the full golden set.
 Add `--rerank` to use the cross-encoder re-ranker (slower but more
 accurate — re-scores top-100 candidates with a joint query-passage model).
 Uses MLX on Apple Silicon, ONNX elsewhere. Add `--output results.json`
-to save results to a file.
+to save results to a file. The `--mode` flag lets you benchmark each
+retrieval strategy independently against the golden set.
 
 The golden set is to be placed at `data/golden_set.jsonl`. Example:
 

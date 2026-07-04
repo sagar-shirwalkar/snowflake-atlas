@@ -59,6 +59,50 @@ def tokenize(text: str) -> list[str]:
     return [t for t in _TOKEN_RE.split(text.lower()) if t]
 
 
+def expand_query(tokens: list[str]) -> list[str]:
+    """Generate morphological variants for BM25 query expansion.
+
+    For each query token, generates common English variants (plural/singular,
+    verb forms) so that e.g. "warehouse" matches "warehouses" in the corpus
+    **without** stemming the corpus itself. The corpus is NOT modified -- all
+    expansion is request-side only.
+
+    Non-matching generated variants contribute zero to BM25 scores (no corpus
+    token to match), making false positives harmless. Only real corpus tokens
+    that match the expanded forms get scored.
+
+    Args:
+        tokens: Tokenized query terms from :func:`tokenize`.
+
+    Returns:
+        Deduplicated list of expanded tokens (original + variants).
+
+    """
+    expanded = list(tokens)
+    for t in tokens:
+        if len(t) <= 3:
+            continue
+        # Plural <-> singular
+        if t.endswith("s"):
+            expanded.append(t[:-1])  # warehouses -> warehouse
+        else:
+            expanded.append(t + "s")  # warehouse -> warehouses
+        # Verb: -ing <-> -e base
+        if t.endswith("ing") and len(t) > 4:
+            base = t[:-3]
+            expanded.append(base)  # creating -> creat
+            expanded.append(base + "e")  # creating -> create
+        elif t.endswith("e") and len(t) > 3:
+            expanded.append(t[:-1] + "ing")  # create -> creating
+            expanded.append(t + "d")  # create -> created
+        # Verb: -ed <-> -e base
+        if t.endswith("ed") and len(t) > 3:
+            base = t[:-2]
+            expanded.append(base)  # created -> creat
+            expanded.append(base + "e")  # created -> create
+    return list(set(expanded))
+
+
 # ── Fielded BM25 index ────────────────────────────────────────────────
 
 
@@ -312,6 +356,10 @@ def rehydrate(path: Path) -> Any:
 def score_index(index: Any, query: str) -> np.ndarray:
     """Score all documents against a query using BM25.
 
+    Applies request-side query expansion (:func:`expand_query`) so that
+    morphological variants (e.g. "warehouse" <-> "warehouses") match without
+    stemming the corpus.
+
     Args:
         index: A rehydrated ``BM25Okapi`` or :class:`FieldedBM25Index` instance.
         query: Raw query string.
@@ -323,5 +371,6 @@ def score_index(index: Any, query: str) -> np.ndarray:
     tokens = tokenize(query)
     if not tokens or index.corpus_size == 0:
         return np.zeros(index.corpus_size, dtype=np.float32)
-    scores = index.get_scores(tokens)
+    expanded = expand_query(tokens)
+    scores = index.get_scores(expanded)
     return np.array(scores, dtype=np.float32)

@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 import pyarrow.parquet as pq
 
+from .bm25_search import score_index as bm25_score
 from .embed import get_embedder, load_embeddings
 from .rerank import CrossEncoderReranker
 
@@ -33,6 +34,13 @@ def load_bundle(bundle_dir: Path, prefer: str = "auto"):
     model_id = bundle_dir / "model" if bundled_model.is_file() else manifest["embedding_model"]
     embedder = get_embedder(model_id, prefer=prefer)
 
+    # Load BM25 index for keyword / hybrid evaluation
+    bm25_path = bundle_dir / "bm25.pkl"
+    bm25_index = None
+    if bm25_path.is_file():
+        from .bm25_search import rehydrate as _load_bm25
+        bm25_index = _load_bm25(bm25_path)
+
     # Extract columns
     pub_col = table.column("publication").to_numpy(zero_copy_only=False)
     file_col = table.column("file").to_pylist()
@@ -45,6 +53,7 @@ def load_bundle(bundle_dir: Path, prefer: str = "auto"):
         "embeddings": embeddings,
         "norms": norms,
         "embedder": embedder,
+        "bm25": bm25_index,
         "pub": pub_col,
         "file": file_col,
         "id": id_col,
@@ -54,12 +63,11 @@ def load_bundle(bundle_dir: Path, prefer: str = "auto"):
     }
 
 
-def search_bundle(bundle: dict, query: str, top_k: int = 10) -> list[dict[str, Any]]:
-    """Run vector search on the bundle."""
+def search_bundle(bundle: dict, query: str, top_k: int = 10, mode: str = "vector") -> list[dict[str, Any]]:
+    """Search the bundle in vector, keyword, or hybrid mode."""
     q = bundle["embedder"].embed([query])[0]
-    scores = (bundle["embeddings"] @ q).flatten() / bundle["norms"].clip(min=1e-9)
+    vec_scores = (bundle["embeddings"] @ q).flatten() / bundle["norms"].clip(min=1e-9)
 
-    # Title boost
     query_tokens = set(query.lower().split())
     if query_tokens:
         import pyarrow.compute as pc
@@ -67,7 +75,26 @@ def search_bundle(bundle: dict, query: str, top_k: int = 10) -> list[dict[str, A
         for t in query_tokens:
             matches = pc.match_substring(bundle["title"], t)
             tb += matches.cast("float32").to_numpy()
-        scores += tb * 0.05
+        boosted = vec_scores + tb * 0.05
+    else:
+        boosted = vec_scores
+
+    if mode == "keyword":
+        bm25 = bundle.get("bm25")
+        if bm25 is None:
+            raise ValueError("BM25 index required for keyword mode (re-build bundle with --prefer auto)")
+        kw_scores = bm25_score(bm25, query)
+        scores = kw_scores + (tb * 0.05 if query_tokens else 0.0)
+    elif mode == "hybrid":
+        bm25 = bundle.get("bm25")
+        if bm25 is None:
+            raise ValueError("BM25 index required for hybrid mode (re-build bundle with --prefer auto)")
+        kw_scores = bm25_score(bm25, query)
+        kw_max = kw_scores.max()
+        kw_norm = kw_scores / kw_max if kw_max > 0 else kw_scores
+        scores = 0.6 * boosted + 0.4 * kw_norm
+    else:
+        scores = boosted
 
     order = np.argsort(-scores)
     results = []
@@ -95,7 +122,7 @@ def load_golden(golden_path: Path) -> list[dict[str, Any]]:
     return queries
 
 
-def evaluate(bundle_dir: Path, golden_path: Path, top_k: int = 10, prefer: str = "auto", rerank: bool = False) -> dict[str, Any]:
+def evaluate(bundle_dir: Path, golden_path: Path, top_k: int = 10, prefer: str = "auto", rerank: bool = False, mode: str = "vector") -> dict[str, Any]:
     """Run evaluation and return metrics."""
     print(f"Loading bundle from {bundle_dir}...")
     bundle = load_bundle(bundle_dir, prefer)
@@ -107,7 +134,7 @@ def evaluate(bundle_dir: Path, golden_path: Path, top_k: int = 10, prefer: str =
 
     print(f"Loading golden set from {golden_path}...")
     golden = load_golden(golden_path)
-    print(f"Evaluating {len(golden)} queries...")
+    print(f"Evaluating {len(golden)} queries ({mode=})...")
 
     precisions = []
     mrrs = []
@@ -117,7 +144,7 @@ def evaluate(bundle_dir: Path, golden_path: Path, top_k: int = 10, prefer: str =
         expected_files = set(item.get("expected_files", []))
         expected_publications = set(item.get("expected_publications", []))
 
-        results = search_bundle(bundle, query, top_k=100 if reranker else top_k)
+        results = search_bundle(bundle, query, top_k=100 if reranker else top_k, mode=mode)
 
         results = reranker.rerank(query, results, top_k=top_k) if reranker and results else results[:top_k]
 
@@ -151,6 +178,7 @@ def evaluate(bundle_dir: Path, golden_path: Path, top_k: int = 10, prefer: str =
     return {
         "num_queries": len(golden),
         "top_k": top_k,
+        "mode": mode,
         "mean_precision": float(mean_precision),
         "std_precision": float(std_precision),
         "mean_mrr": float(mean_mrr),
@@ -166,6 +194,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--golden", type=Path, required=True, help="Path to golden set (JSONL)")
     p.add_argument("--top-k", type=int, default=10, help="Top-k for evaluation")
     p.add_argument("--prefer", choices=["auto", "apple", "nvidia", "cpu"], default="auto")
+    p.add_argument("--mode", choices=["vector", "keyword", "hybrid"], default="vector",
+                    help="Search mode for retrieval (default: vector)")
     p.add_argument("--rerank", action="store_true", help="Use cross-encoder re-ranker")
     p.add_argument("--output", type=Path, help="Output JSON file for results")
     return p.parse_args()
@@ -179,6 +209,7 @@ def _run() -> int:
         top_k=args.top_k,
         prefer=args.prefer,
         rerank=args.rerank,
+        mode=args.mode,
     )
 
     print("\n" + "=" * 50)
@@ -186,10 +217,11 @@ def _run() -> int:
     print("=" * 50)
     print(f"  Queries evaluated: {results['num_queries']}")
     print(f"  Top-k:             {results['top_k']}")
+    print(f"  Mode:              {results['mode']}")
     print(f"  Re-ranked:         {results['reranked']}")
     print()
-    print(f"  Precision@{results['top_k']}: {results['mean_precision']:.4f} ± {results['std_precision']:.4f}")
-    print(f"  MRR:                {results['mean_mrr']:.4f} ± {results['std_mrr']:.4f}")
+    print(f"  Precision@{results['top_k']}: {results['mean_precision']:.4f} \u00b1 {results['std_precision']:.4f}")
+    print(f"  MRR:                {results['mean_mrr']:.4f} \u00b1 {results['std_mrr']:.4f}")
     print("=" * 50)
 
     if args.output:

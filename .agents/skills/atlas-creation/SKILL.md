@@ -87,6 +87,10 @@ clients get better recall without any configuration.
 - Fusion formula: `0.6 * dense_score + 0.4 * bm25_norm` (weights tuned empirically).
 - BM25 index built at bundle-build time via `rank-bm25::BM25Okapi` from chunk texts.
 - Default BM25 parameters: `k1=2.0, b=0.7` (tuned for longer reference docs — higher TF saturation ceiling, reduced length normalisation penalty).
+- **Interleaved candidate pool:** For hybrid and keyword modes, the candidate pool is the
+  union of the top-N vector-selected and top-N BM25-selected indices. This ensures
+  BM25-favoured documents (short, exact-match, low vector similarity) still enter the
+  fusion. Zero extra BM25 computation (already O(N) per query).
 - Graceful fallback: if `bm25.pkl` is missing (older bundles), hybrid falls back to
   title-boost heuristic with a log warning.
 
@@ -154,13 +158,23 @@ treated as a separate BM25 field. Filenames in well-structured documentation
 corpuses are hand-crafted identifiers that directly encode topic relevance:
 
 ```
-sql-reference/sql/create-warehouse.md   → tokens: sql, reference, sql, create, warehouse
-user-guide/warehouses-considerations.md  → tokens: user, guide, warehouses, considerations
+api/endpoints/create-user.md      → tokens: api, endpoints, create, user
+guides/permissions-roles.md       → tokens: guides, permissions, roles
 ```
 
 The `.md` extension is stripped before tokenization so the tokenizer produces
 clean, meaningful tokens. A query containing "create warehouse" matches
 directly against the file-path tokens of `create-warehouse.md`.
+
+**Request-side query expansion (corpus-free):** The BM25 tokenizer applies
+morphological variant generation at query time — for each query token it generates
+plural/singular forms and common verb variants (e.g., ``"warehouse"`` →
+``"warehouses"``, ``"warehousing"``; ``"create"`` → ``"creating"``,
+``"created"``). This bridges the morphological gap without stemming the corpus,
+preserving the full word forms for any future NLP use. SQL identifiers like
+``TO_DATE`` pass through unchanged. Short tokens (≤3 chars) skip expansion.
+Non-matching generated variants contribute zero to BM25 scores — false positives
+are harmless. Cost: ~0.01ms per query, zero build-time overhead.
 
 **Cost profile:** Zero query-time LLM cost. Build-time overhead is negligible
 (~1-2 s for 250k chunks). Query-time scoring iterates over fields (microseconds).
@@ -168,7 +182,47 @@ Pickle size increases marginally (~100 KB for 50k chunks with 4 fields).
 
 ---
 
-### 6. Contextual Retrieval
+### 6. Adaptive Diversity Ranking (AdaGReS)
+
+**Idea:** Hybrid search fusion often returns multiple chunks from the same file
+in the top-k results — a long document split across many sections can dominate
+the ranking, crowding out relevant chunks from other files. AdaGReS (Adaptive
+Greedy Selection) is a diversity-aware ranking algorithm that adaptively trades
+relevance for diversity as rank increases. At rank 1, relevance is prioritised;
+by rank 5, diversity dominates. This ensures the top-k results are both relevant
+and file-diverse — critical for AI agents that scan only the top 3-5 results.
+
+**How it works:**
+
+1. Start with the highest-scoring item (pure relevance).
+2. For each subsequent pick, compute an adaptive lambda:
+   ``λ_k = exp(-α × (k-1))`` where ``α = 0.5``.
+3. Score each remaining candidate:
+   ``Score(j) = λ_k × relevance(j) + (1 - λ_k) × (1 - max_sim(j, selected))``
+4. ``max_sim`` is the candidate's maximum similarity to already-selected items.
+
+**Similarity rules for heading-aware dedup:**
+
+| Condition | sim | Meaning |
+|-----------|-----|---------|
+| Same file + same heading | 1.0 | Fully redundant — blocked |
+| Same file + different heading | 0.5 | Different section, partially penalised |
+| Different file | 0.0 | No penalty — diversity automatically favoured |
+
+**Implementation (query-time only, no rebuild needed):**
+
+- ``atlas/rag_server.py::Bundle._adagres_select()`` is called after hybrid fusion
+  and before result collection.
+- Uses ``self._files`` and ``self._headings`` already loaded from the bundle.
+- O(n × k) complexity with n = pool size (~200-400) and k = top_k (~5-10).
+  Imperceptible at query time (~0.01ms).
+
+**Cost profile:** Zero LLM cost. Zero build-time cost. Query-time overhead of
+~0.01ms per search. No bundle rebuild required.
+
+---
+
+### 7. Contextual Retrieval
 
 **Source:** [Anthropic Blog — Introducing Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval) (Sep 2024)
 
@@ -295,7 +349,8 @@ single unified retriever.
 | Maximum recall without config | Hybrid Search as Default (#3) | Low | High | Build-time BM25 indexing, zero query-time LLM |
 | Precision boost for top results | Cross-Encoder Reranker (#4) | Medium | High | Build-time weight conversion, passive at query |
 | Structured keyword relevance | Fielded BM25 + File-Path (#5) | Low | Medium | Build-time per-field indexing, zero query-time cost |
-| Context-disambiguated chunks | Contextual Retrieval (#6) | High | High | Build-time LLM call per chunk, zero query-time cost |
+| Context-disambiguated chunks | Contextual Retrieval (#7) | High | High | Build-time LLM call per chunk, zero query-time cost |
+| Diverse top-k for AI agents | AdaGReS Diversity (#6) | Low | Medium | Query-time O(n×k) selection, zero LLM, no rebuild |
 | Unified dense+sparse retrieval | ColBERT (Future) | High | High | Specialized indexing pipeline, single-pass search |
 
 ## Core concepts (leading words)
@@ -311,6 +366,8 @@ single unified retriever.
 - **fielded-bm25** — multi-field BM25 index (text + title + heading + file_path) with per-field weights, built at bundle time
 - **file-path-bm25** — document file paths as BM25 field tokens; filenames like `create-warehouse` are expert-curated relevance signals
 - **reranker** — optional cross-encoder (MLX or ONNX) that re-scores top-100 candidates for precision
+- **query-expansion** — request-side morphological variant generation for BM25 tokens (singular/plural, verb forms), no corpus modification needed
+- **adagres** — heading-aware diversity ranking that adaptively trades relevance for diversity across rank positions, zero rebuild cost
 - **doctor** — diagnostic probe (`atlas-doctor`) showing platform, backend probes, selected backend + reason
 - **source-adapter** — pluggable interface to fetch markdown from git, web crawl, local dir, or API
 
@@ -325,16 +382,16 @@ single unified retriever.
 | 2 | Chunker (`atlas/chunk.py`) | `chunk_file()` returns dicts with 10 required keys; H2-boundary split + chunk overlap (150 chars) |
 | 3 | Embedding backends (`atlas/embed/`) | 3 backends (MLX, ONNX-CUDA, ONNX-CPU); factory picks best at runtime |
 | 4 | FS MCP server (`atlas/fs_server.py`) | 5 tools registered; deterministic; ripgrep-backed; path traversal blocked |
-| 5 | RAG MCP server (`atlas/rag_server.py`) | 4 tools registered; bundle loaded once; cosine via matrix multiply; hybrid as default mode |
+| 5 | RAG MCP server (`atlas/rag_server.py`) | 4 tools registered; bundle loaded once; cosine via matrix multiply; hybrid as default mode with interleaved candidate pool and AdaGReS diversity ranking |
 | 6 | Bundle builder (`atlas/make_bundle.py`) | End-to-end: fetch → chunk (w/ overlap + cluster_tags) → embed → fielded BM25 index (text + title + heading + file_path) → write artifacts → stage model → manifest w/ SHA256 |
 | 7 | Download + verify (`atlas/download.py`) | GitHub Releases download; SHA256 verify; backup existing before overwrite |
-| 8 | Utilities | backup, restore, doctor, smoke_test, evaluate, log, rerank (MLX + ONNX) — all working standalone |
+| 8 | Utilities | backup, restore, doctor, smoke_test, evaluate (with `--mode vector|keyword|hybrid`), log, rerank (MLX + ONNX) — all working standalone |
 | 9 | Tests (`tests/`) | Pytest suite passes: chunker (incl. overlap), embed backends, FS/RAG servers, bundle build, BM25, reranker |
 | 10 | CI + Release | GitHub Actions smoke test; `scripts/publish-bundle.sh` creates release |
 
 ---
 
-## Source Adapters (NEW — Generic Input Handling)
+## Source Adapters
 
 The bundle builder (`make_bundle.py`) now accepts a **source adapter** that provides a uniform interface over different documentation sources.
 

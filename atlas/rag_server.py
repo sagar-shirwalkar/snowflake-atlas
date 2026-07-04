@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import time
 import uuid
 from pathlib import Path
@@ -204,21 +205,42 @@ class Bundle:
             order = np.argsort(-scores)
             return self._collect(min_score, scores[order], scores[order], top_k, idx_map=order)
 
+        # ── Interleaved candidate pool (vector + BM25) ────────────────
         candidate_pool = max(top_k * 20, 50)
         masked = np.where(mask, boosted, -np.inf)
         pool_size = min(candidate_pool, int(mask.sum()))
         if pool_size == 0:
             return []
-        pool_idx = np.argpartition(-masked, pool_size - 1)[:pool_size]
+
+        # Compute BM25 early (needed for interleaved pool and hybrid fusion)
+        if self._bm25 is not None:
+            all_kw = bm25_score(self._bm25, query)
+        elif query_tokens:
+            all_kw = np.array(
+                [sum(t in txt.lower() for t in query_tokens) for txt in self._texts],
+                dtype=np.float32,
+            )
+        else:
+            all_kw = None
+
+        # Vector-selected pool (always)
+        vec_pool = np.argpartition(-masked, pool_size - 1)[:pool_size]
+
+        # BM25-selected pool interleaved for keyword-aware modes
+        if mode in ("keyword", "hybrid") and all_kw is not None:
+            kw_masked = np.where(mask, all_kw, -np.inf)
+            kw_pool = np.argpartition(-kw_masked, pool_size - 1)[:pool_size]
+            pool_idx = np.unique(np.concatenate([vec_pool, kw_pool]))
+        else:
+            pool_idx = vec_pool
 
         if not query_tokens:
             order = np.argsort(-boosted[pool_idx])
             pool_idx = pool_idx[order]
             return self._collect(min_score, boosted[pool_idx], boosted[pool_idx], top_k)
 
-        # Compute BM25 scores for the candidate pool (or fall back to token counting)
-        if self._bm25 is not None:
-            all_kw = bm25_score(self._bm25, query)
+        # BM25 scores for the selected pool
+        if all_kw is not None:
             kw_raw = all_kw[pool_idx]
         else:
             kw_raw = np.array(
@@ -226,6 +248,7 @@ class Bundle:
                 dtype=np.float32,
             )
 
+        # ── Fusion ───────────────────────────────────────────────────
         if mode == "keyword":
             scores = kw_raw + tb[pool_idx]
             vec_ref = kw_raw
@@ -239,6 +262,13 @@ class Bundle:
         pool_idx = pool_idx[order]
         scores = scores[order]
         vec_ref = vec_ref[order]
+
+        # ── AdaGReS diversity for hybrid mode ────────────────────────
+        if mode == "hybrid" and top_k > 1 and len(pool_idx) > top_k:
+            sel = self._adagres_select(scores, pool_idx, top_k)
+            pool_idx = pool_idx[sel]
+            scores = scores[sel]
+            vec_ref = vec_ref[sel]
 
         return self._collect(min_score, scores, vec_ref, top_k, idx_map=pool_idx)
 
@@ -272,6 +302,81 @@ class Bundle:
                 }
             )
         return results
+
+    def _adagres_select(
+        self,
+        pool_scores: np.ndarray,
+        pool_idx: np.ndarray,
+        top_k: int,
+        alpha: float = 0.5,
+    ) -> np.ndarray:
+        """Heading-aware AdaGReS diversity ranking.
+
+        Adaptively trades relevance for diversity as rank increases.
+        At k=1 the top score item is always kept.  At each subsequent
+        step an adaptive lambda penalises candidates whose file+heading
+        has already been selected.
+
+        Similarity rules:
+        - Same file + same heading: fully redundant (sim=1.0)
+        - Same file + different heading: partial (sim=0.5)
+        - Different file: no penalty (sim=0.0)
+
+        Args:
+            pool_scores: Hybrid fusion scores, sorted descending.
+            pool_idx: Corpus index for each pool entry.
+            top_k: Number of items to select.
+            alpha: AdaGReS decay rate (default 0.5).
+
+        Returns:
+            Indices into *pool_scores* / *pool_idx* for the selected
+            items, preserving original score order.
+
+        """
+        n = len(pool_scores)
+        if n <= top_k:
+            return np.arange(n, dtype=np.intp)
+
+        pool_files = [self._files[i] for i in pool_idx]
+        pool_headings = [self._headings[i] for i in pool_idx]
+
+        selected = [0]  # always keep the top-scoring item
+        chosen: set[tuple[str, str]] = {(pool_files[0], pool_headings[0])}
+        remaining = set(range(1, n))
+
+        while len(selected) < top_k and remaining:
+            k = len(selected) + 1
+            lambda_k = math.exp(-alpha * (k - 1))
+
+            best_j: int | None = None
+            best_score = -1.0
+
+            for j in remaining:
+                # Maximum similarity to any already-selected item
+                max_sim = 0.0
+                fj = pool_files[j]
+                hj = pool_headings[j]
+                for i in selected:
+                    if fj == pool_files[i]:
+                        if hj == pool_headings[i]:
+                            max_sim = 1.0  # same file + heading
+                            break
+                        max_sim = max(max_sim, 0.5)  # same file, diff heading
+                    # else sim = 0.0 (different file)
+
+                score = lambda_k * float(pool_scores[j]) + (1.0 - lambda_k) * (1.0 - max_sim)
+                if score > best_score:
+                    best_score = score
+                    best_j = j
+
+            if best_j is not None:
+                selected.append(best_j)
+                chosen.add((pool_files[best_j], pool_headings[best_j]))
+                remaining.remove(best_j)
+            else:
+                break
+
+        return np.array(selected, dtype=np.intp)
 
     def get_chunk(self, chunk_id: str) -> dict[str, Any] | None:
         """Return a single chunk by its ID, or None if not found."""

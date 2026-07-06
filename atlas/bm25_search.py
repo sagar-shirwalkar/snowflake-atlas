@@ -129,7 +129,7 @@ class FieldedBM25Index:
         self._indexes: dict[str, Any] = {}
 
         for field_name, texts in field_texts.items():
-            if texts:
+            if texts and any(tokenize(t) for t in texts):
                 tokenized = [tokenize(t) for t in texts]
                 self._indexes[field_name] = BM25Okapi(
                     tokenized, k1=_DEFAULT_K1, b=_DEFAULT_B
@@ -154,7 +154,11 @@ class FieldedBM25Index:
         combined: np.ndarray | None = None
         for field_name, bm25 in self._indexes.items():
             weight = self.field_weights.get(field_name, 1.0)
-            field_scores = np.array(bm25.get_scores(tokens), dtype=np.float32)
+            scores = bm25.get_scores(tokens)
+            if bm25.corpus_size == 0:
+                field_scores = np.zeros(self.corpus_size, dtype=np.float32)
+            else:
+                field_scores = np.array(scores, dtype=np.float32)
             if combined is None:
                 combined = weight * field_scores
             else:
